@@ -272,7 +272,7 @@ public sealed partial class RealPrinterMod
     public const string ToolAtlasPath = "Items/items_tool";
 
     /// <summary>本 mod 版本号（横幅与排障日志都要打，核桃靠它确认跑的是哪一版）。</summary>
-    public const string SuiteVersion = "1.4.14";
+    public const string SuiteVersion = "1.4.15";
 
     // ═══════════════════════════════════════════════════════════
     // 日志：所有输出走这里，方便排障时统一关掉。
