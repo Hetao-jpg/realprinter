@@ -563,6 +563,28 @@ public sealed partial class RealPrinterMod
             return;
         }
 
+        // ★★ V1.4.15：目标档位与当前真值相同 → 早退，不写入不扣费。
+        //   【为什么在这里而非 WriteFeature】
+        //     WriteFeature 的调用方只看"成功/失败"，看不到"本次无改动"这个语义；
+        //     在这里早退最直接 —— 既不进 IL2CPP，也不会让玩家为
+        //     "点了一下没变化"付费。
+        //   【为什么要拦】选"已经是这个档位"的候选时，旧版会：
+        //     ① 建新 ItemCondition 对象
+        //     ② 调 SetConditions（把同样的值写一遍）
+        //     ③ 调 ExecuteOnActivateAction（**可能重复执行游戏动作，有副作用**）
+        //     ④ 扣一次费
+        //     —— 玩家会看到"没变化却扣了钱"，是最容易招致差评的体验。
+        if (fr != null && !string.IsNullOrEmpty(fr.RealId)
+            && string.Equals(fr.RealId, input, StringComparison.OrdinalIgnoreCase))
+        {
+            string zhSame = OfficialDisplay(input);
+            if (string.IsNullOrEmpty(zhSame) || string.Equals(zhSame, input, StringComparison.Ordinal))
+                zhSame = input;
+            Inform("已经是「" + zhSame + "」了，无需修改", "yellow");
+            RLog.Detail("真值改写跳过（无改动）：" + fr.Id + " 已是 " + input);
+            return;
+        }
+
         int cost = Config.FeatureCost;
         if (sess.Cash < cost)
         {

@@ -254,19 +254,22 @@ public sealed partial class RealPrinterMod : MelonMod
     ///   关着 cfg 时——**首行 return，零开销**（只读一次静态 bool）。
     ///   关闭时按 F6 无反应且不弹提示（核桃 2026-10-05 拍板）。
     /// </summary>
+    /// <summary>
+    /// ★★ V1.4.12：恢复 F6 直领热键轮询。
+    ///   关着 cfg 时 —— **首行 return，零开销**（只读一次静态 bool）。
+    ///   关闭时按 F6 无反应且不弹提示（核桃 2026-10-05 拍板）。
+    ///
+    /// 【历史】V1.4.6~V1.4.11 期间本覆写曾被删除（那段时间 F6 直领停用，
+    ///   PollHotkeys 空转）。V1.4.12 恢复 F6 + cfg 开关后重新启用。
+    ///   V1.4.15 修正：删除下方与本覆写矛盾的过时注释（它说"已删除"，
+    ///   代码却挂着 —— 读者会以为覆写是意外残留）。
+    /// </summary>
     public override void OnUpdate()
     {
         if (!Config.EnableF6Give) return;
         try { PollHotkeys(); }
         catch (Exception ex) { RLog.Swallowed("OnUpdate", ex); }
     }
-    /// <summary>
-    /// ★★ V1.4.11：`OnUpdate()` 覆写已删除。
-    ///   原来它每帧只做一件事 —— 调 `PollHotkeys()`，而那个方法自 V1.4.6 起
-    ///   **什么都不做**（F6 直领开关已从 cfg 移除，玩家无开启途径）。
-    ///   详见 Runtime.cs 末尾的整段说明。
-    ///   → 现在 MelonLoader 不再回调本 mod 的每帧入口，**每帧的原生调用归零**。
-    /// </summary>
 
     public override void OnSceneWasLoaded(int buildIndex, string sceneName)
     {

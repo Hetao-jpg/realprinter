@@ -151,11 +151,64 @@ public sealed partial class RealPrinterMod
     /// <summary>
     /// 立刻全量扫存档重建白名单（自检 / 手动强开用）。
     /// 读档后指针全变，RepairMachinesAfterLoad 每次都会调它刷新。
+    /// ★ V1.4.14：改调 RebuildAndPruneRegistry —— 重建的同时清掉死指针。
     /// </summary>
     internal static int BuildMachineRegistryNow()
     {
-        try { FindOurMachines(); } catch (Exception ex) { RLog.Swallowed("BuildMachineRegistryNow", ex); }
+        try { RebuildAndPruneRegistry(); } catch (Exception ex) { RLog.Swallowed("BuildMachineRegistryNow", ex); }
         return MachineRegistryCount;
+    }
+
+    /// <summary>
+    /// ★★ V1.4.14：全量扫存档重建白名单，并**差集清理**已失效的旧指针。
+    ///
+    /// 【为什么必须清 —— V1.4.13 的静默误触发根因】
+    ///   旧版只 Register 不 Remove：读档后 IL2CPP 指针全变、旧指针全部作废，
+    ///   但它们永远留在 `_machinePtrs` 里。IL2CPP 分配器会**复用地址** ——
+    ///   放大镜/水桶拿到旧打印机的地址后，热路径 `IsOurMachine` 查表命中
+    ///   → `TryClaim` 通过 → May/Can 强制 true 短路原版 → Target 开编辑窗。
+    ///   （实机：右键放大镜/水桶触发真实打印机功能。）
+    ///
+    /// 【差集清理 vs 先清后扫】
+    ///   先清后扫：FindOurMachines 抛异常时白名单直接归零，交互全挂。
+    ///   差集清理：先扫出"当前确实还在场上的"指针集合，
+    ///             再把登记表里不在集合内的条目移除 ——
+    ///             扫描失败只会保留旧条目（可能含死指针，但不会凭空丢机器）。
+    ///
+    /// 【性能】FindOurMachines 本身就是全量扫（RepairMachinesAfterLoad 每秒
+    ///   最多跑一次），差集只是多一次 HashSet 构建 + 遍历登记表，
+    ///   冷路径，可接受。
+    /// </summary>
+    internal static int RebuildAndPruneRegistry()
+    {
+        var machines = FindOurMachines();
+
+        // ① 收集"当前确实还在场上"的指针集合
+        var alive = new HashSet<long>();
+        for (int i = 0; i < machines.Count; i++)
+        {
+            try
+            {
+                long p = ((Il2CppObjectBase)machines[i]).Pointer.ToInt64();
+                if (p != 0) alive.Add(p);
+            }
+            catch (Exception ex) { RLog.Swallowed("RebuildAndPrune.alive", ex); }
+        }
+
+        // ② 差集：登记表里不在 alive 集合内的 → 死指针，移除
+        var stale = new List<long>();
+        foreach (var kv in _machinePtrs)
+            if (!alive.Contains(kv.Key)) stale.Add(kv.Key);
+
+        for (int i = 0; i < stale.Count; i++)
+            _machinePtrs.TryRemove(stale[i], out _);
+
+        if (stale.Count > 0)
+            RLog.Detail("登记表差集清理：移除 " + stale.Count
+                       + " 条失效指针（读档/销毁后残留），现存 "
+                       + _machinePtrs.Count + " 条");
+
+        return _machinePtrs.Count;
     }
 
     /// <summary>

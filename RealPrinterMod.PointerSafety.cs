@@ -48,6 +48,10 @@ public sealed partial class RealPrinterMod
     private const int IdOffset = 0x1C0;      // private string <identifier>k__BackingField
     private const int StateOffset = 0x1B0;    // private TagSystem <state>k__BackingField
 
+    /// ★★ V1.4.15：偏移自检"拿不到探针"是否已报警过 —— 首次 Warning，后续 Detail。
+    ///   详见 SelfCheckOffsets 里 probe==null 分支的说明。
+    private static bool _offsetProbeWarned;
+
     // ═══════════════════════════════════════════════════════════
     // ★★★ 硬编码偏移量自检（代码评审 P0-2，我认为这是全项目**最有价值**的一条）
     //
@@ -126,13 +130,28 @@ public sealed partial class RealPrinterMod
 
         if (probe == null)
         {
-            // ★ 拿不到探针 = **无法下结论**，不等于「偏移已失效」。
-            //   这两种情况必须区分：后者是必须马上报警的故障，前者只是这次没验成。
-            //   实机日志里这一行每次启动都出现，属于常态噪音 —— 降级为 Detail，
-            //   并说清"下次进游戏/按 F6 领一台机器后仍会复查"。
-            RLog.Detail("偏移自检跳过：启动早期拿不到可用探针物品（"
-                      + string.Join("/", probeIds) + " 都没取到），本次未验证。"
-                      + " 这不代表偏移失效；下次进入存档后会复查。");
+            // ★★ V1.4.15：从 Detail 升级为"首次 Warning + 后续 Detail"。
+            //   【为什么不能一直 Detail】偏移是全项目**唯一一处"游戏升级就会断"**
+            //     的地方。旧版 Detail 静默 → 游戏更新后本自检**每局都跳过**，
+            //     日志里一行告警都没有，玩家只看到"功能莫名失效"，
+            //     正是核桃铁律最忌的静默失效。
+            //   【为什么不能每次都 Warning】每次启动都报 Warning 也会变噪音。
+            //     折中：**首次**报 Warning（明确说"当前游戏偏移未校验"），
+            //     后续同类静默为 Detail。
+            //   【恢复方法】玩家进一次存档 / 按一次 F6 后，探针就存在了 ——
+            //     届时重启游戏即可看到"偏移自检通过"。
+            if (!_offsetProbeWarned)
+            {
+                _offsetProbeWarned = true;
+                RLog.Warning("偏移自检**本次未验证**：启动早期拿不到探针物品（"
+                          + string.Join("/", probeIds) + " 都没取到）。"
+                          + "这不代表偏移失效，但**当前游戏版本的偏移未经校验**。"
+                          + "若功能异常，请进一次存档后重启游戏，届时会自动复查。");
+            }
+            else
+            {
+                RLog.Detail("偏移自检跳过（本次仍未取到探针，已提示过一次）。");
+            }
             return bad;
         }
 

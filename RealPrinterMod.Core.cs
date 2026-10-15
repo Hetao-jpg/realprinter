@@ -272,7 +272,7 @@ public sealed partial class RealPrinterMod
     public const string ToolAtlasPath = "Items/items_tool";
 
     /// <summary>本 mod 版本号（横幅与排障日志都要打，核桃靠它确认跑的是哪一版）。</summary>
-    public const string SuiteVersion = "1.4.13";
+    public const string SuiteVersion = "1.4.14";
 
     // ═══════════════════════════════════════════════════════════
     // 日志：所有输出走这里，方便排障时统一关掉。
@@ -591,16 +591,29 @@ public sealed partial class RealPrinterMod
             { "注射器",   "CATEGORY_GENUINE_INJECTOR" },
         };
 
+        // ★★ V1.4.15：`_catResolved` 语义改为「已确定」——
+        //   只有**成功拿到游戏表**或**用尽重试退回手写兜底**时才置 true。
+        //   重试期间保持 false，让每次调用都能重新探测游戏静态表。
         private static bool _catResolved;
+        private static int _catRetry;      // 已重试次数（用尽 3 次后不再试，退回手写兜底）
 
         /// <summary>
         /// ★ 从游戏自己的分类档位表解析出每个语义标签的真实 category 名。
         ///   必须在**官方档位目录建好之后**调（那些静态列表由 .cctor 填充）。
+        ///
+        /// ★★ V1.4.15：改成**有限次重试**（最多 3 次）。
+        ///   【为什么】旧版第一行就 `_catResolved = true` —— 一旦启动早期
+        ///     游戏 .cctor 还没跑完、读到空表，就**永久锁死**成手写兜底，
+        ///     再也不重试。这与 `AllowCatalogRetry` 是同款静默失效。
+        ///   【为什么限 3 次】无限重试 = 每次开窗刷异常日志；3 次足够跨启动窗口。
         /// </summary>
-        private static void ResolveCategoryNames()
+        /// <returns>true = 已确定（成功 或 已退回手写兜底）；false = 本次失败、允许下次重试。</returns>
+        private static bool ResolveCategoryNames()
         {
-            if (_catResolved) return;
-            _catResolved = true;
+            if (_catResolved) return true;
+
+            // ★ 每次都先清空重扫 —— 避免上次失败残留污染本次结果
+            _catRealNames.Clear();
             foreach (var kv in _catListAccessors)
             {
                 try
@@ -615,25 +628,33 @@ public sealed partial class RealPrinterMod
                 catch (Exception ex) { RLog.Swallowed("ResolveCategoryNames", ex); }
             }
 
-            if (_catRealNames.Count == 0)
+            if (_catRealNames.Count > 0)
             {
-                // ★ 读不到游戏表 → 用手写兜底，但**必须在横幅里报出来**，
-                //   否则就是"默默开不了窗"。
-                foreach (var kv in _catFallback) _catRealNames[kv.Key] = kv.Value;
-                RLog.Warning("⚠ 许可类别名读取失败，已回退到**手写字符串**"
-                             + "（若机器开不了窗，多半是这个原因）。");
-            }
-            else
-            {
+                _catResolved = true;
                 foreach (var kv in _catRealNames)
                     RLog.Detail("许可类别 " + kv.Key + " → 游戏真实 category = " + kv.Value);
+                return true;
             }
+
+            // ★ 一个字都没读到 —— 允许有限次重试
+            if (_catRetry < 3)
+            {
+                _catRetry++;
+                RLog.Detail("许可类别名读取失败（第 " + _catRetry + " 次尝试），稍后重试。");
+                return false;
+            }
+
+            // 用尽重试 → 退回手写兜底 + 明摆着报警（否则就是"默默开不了窗"）
+            _catResolved = true;
+            foreach (var kv in _catFallback) _catRealNames[kv.Key] = kv.Value;
+            RLog.Warning("⚠ 许可类别名读取失败（已重试 " + _catRetry
+                         + " 次）→ 回退到**手写字符串**（若机器开不了窗，多半是这个原因）。");
+            return true;
         }
 
-        /// <summary>本次许可真正放行的 category 名集合（启动时解析一次）。</summary>
+        /// <summary>本次许可真正放行的 category 名集合。</summary>
         private static HashSet<string> BuildAllowedSet()
         {
-            ResolveCategoryNames();
             var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var v in _catRealNames.Values) set.Add(v);
             return set;
@@ -706,14 +727,24 @@ public sealed partial class RealPrinterMod
         public static bool IsAllowed(string cat)
         {
             if (string.IsNullOrEmpty(cat)) return false;
-            if (_allowed == null) _allowed = BuildAllowedSet();
+            if (_allowed == null)
+            {
+                // ★★ V1.4.15：只有 ResolveCategoryNames 返回 true 时才锁缓存。
+                //   重试期间（返回 false）不缓存 —— 下次调用会再试一次。
+                if (!ResolveCategoryNames()) return false;
+                _allowed = BuildAllowedSet();
+            }
             return _allowed.Contains(cat);
         }
 
         /// <summary>全部许可 category 名（横幅/自检用）。</summary>
         public static string[] AllAllowed()
         {
-            if (_allowed == null) _allowed = BuildAllowedSet();
+            if (_allowed == null)
+            {
+                if (!ResolveCategoryNames()) return Array.Empty<string>();
+                _allowed = BuildAllowedSet();
+            }
             var a = new string[_allowed.Count];
             _allowed.CopyTo(a);
             return a;

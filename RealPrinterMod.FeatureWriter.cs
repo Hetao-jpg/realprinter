@@ -72,11 +72,14 @@ public sealed partial class RealPrinterMod
         var target = ResolveOfficialCondition(newId);
         if (target == null)
         {
-            message = "找不到官方档位对象：" + newId
-                      + "　→ 这档没在 ItemConditionList.Create* 映射表里。"
-                      + "不做降级处理（降级会造成价格不动 + 英文显示）。"
-                      + "把这行字和上面的候选列表给我，我照单补映射。";
-            RLog.Warning("★ 无法解析官方档位: " + newId);
+            // ★★ V1.4.15：玩家面 / 开发者面拆开 ——
+            //   `message` 会被上层 `Inform` **弹给玩家看**，不能出现"给我"这种口吻。
+            //   细节全部落日志（玩家看不到，但排障时能看到完整信息）。
+            message = "这档暂不可用（游戏里没有这个档位名）";
+            RLog.Warning("★ 无法解析官方档位: " + newId
+                       + "　→ 这档没在 ItemConditionList.Create* 映射表里。"
+                       + "不做降级处理（降级会造成价格不动 + 英文显示）。"
+                       + "把这行字和上面的候选列表发我，我照单补映射。");
             return false;
         }
 

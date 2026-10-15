@@ -76,6 +76,14 @@ F6 按了没反应	正常 —— EnableF6Give 默认关闭。想用去 ModManage
 
 第二部分 · 开发文档
 版本历史
+V1.4.14（2026-10-15）· 修复右键放大镜/水桶误触发真实打印机
+根因：`_machinePtrs` 指针白名单只增不清 —— 读档后旧指针全部作废却永驻表内；游戏中途销毁机器（卖掉/丢垃圾桶/客户买走）也无人注销。IL2CPP 分配器复用地址后，放大镜/水桶拿到旧打印机地址 → 热路径 `IsOurMachine` 查表误判为真 → `TryClaim` 通过 → May/Can 强制 true 短路原版（放大镜 INSPECTABLE 闸门被绕过）→ Target 开编辑窗。
+改动	说明
+MachineRegistry 新增 RebuildAndPruneRegistry	全量扫存档重建白名单的同时做差集清理：先扫出"当前还在场上"的指针集合，再把登记表里不在集合内的条目移除。比"先清后扫"更安全 —— 扫描失败只保留旧条目，不会凭空丢机器
+BuildMachineRegistryNow 改调 RebuildAndPruneRegistry	自检/手动重建路径同步获得差集清理
+RepairMachinesAfterLoad 改调 RebuildAndPruneRegistry	读档后重建白名单时清掉作废指针（原先只 Register 不 Remove，死指针永驻）
+Patch_Target 加点击级冷复核	Target 只在玩家真的点击时触发（非热路径），可安全进 IL2CPP。若 self 指针在白名单但 tag/identifier 对不上（疑似地址复用），注销死指针 + 放行原版，避免放大镜/水桶误开编辑窗。May/Can 热路径保持纯指针查表（零 IL2CPP），不加任何深校验
+版本号 1.4.13 → 1.4.14	csproj Version + SuiteVersion 同步
 V1.4.13（2026-10-05）· cfg 热更新 + F6 直领 + 物品池注册
 改动	说明
 cfg 热更新	InitPreferences() 给 4 个 entry 挂 OnEntryValueChanged.Subscribe，面板改值立刻同步到 Config.xxx 静态字段

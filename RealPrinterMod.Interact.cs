@@ -153,6 +153,19 @@ public sealed partial class RealPrinterMod
         {
             if (!TryClaim(__instance, targetItem)) return true;
 
+            // ★★ V1.4.14：点击级冷复核 —— Target 只在玩家真的点击时触发（不是热路径），
+            //   可以安全进 IL2CPP。若 self 的指针已被游戏销毁、被地址复用给了别的物品
+            //   （读档/卖掉/垃圾桶后常见），LooksLikeOurMachineByTag 会认不出 →
+            //   注销死指针 + 放行原版，避免放大镜/水桶误触发编辑窗。
+            if (!LooksLikeOurMachineByTag(__instance))
+            {
+                RLog.Warning("★ 冷复核失败：self 指针已在白名单但 tag/identifier 对不上"
+                           + "（疑似读档/销毁后地址复用）—— 已注销，本次放行原版。"
+                           + " ptr=" + SafePtr(__instance));
+                UnregisterMachine(__instance);
+                return true;
+            }
+
             // ★ 只接管这一次；OnTargetItemFunc 内部会开窗。
             // ★★ V1.4.11：把 `Config.VerboseLog` 判据提到调用点。
             //   `SafeId()` 在命中我方白名单时会做 4 次原生调用

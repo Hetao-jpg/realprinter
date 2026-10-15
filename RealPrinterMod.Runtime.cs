@@ -52,30 +52,17 @@ public sealed partial class RealPrinterMod
             if (!inStore) return;
 
 
-            var machines = FindOurMachines();
-            if (machines.Count == 0)
+            // ★★ V1.4.14：改调 RebuildAndPruneRegistry —— 不只是重建，还要差集清理
+            //   读档后作废的旧指针（否则 IL2CPP 地址复用会让放大镜/水桶
+            //   被 IsOurMachine 误判成我们的机器 → 右键触发编辑窗）。
+            int registered = RebuildAndPruneRegistry();
+            if (registered == 0)
             {
                 RLog.Detail("读档检查：存档里没有真实打印机（按 F6 领一台）。");
                 return;
             }
 
-            int registered = MachineRegistryCount;
-            if (registered == 0)
-                RLog.Error("★★ 指针白名单重建后仍是空的 —— 交互必然失效（左键点物品没反应）。请重启游戏。");
-
-            //逐台确认物品状态正常（identifier / tag 读得到 = 还认得出来）
-            int ok = 0, bad = 0;
-            for (int i = 0; i < machines.Count; i++)
-            {
-                try { if (IsOurMachine(machines[i])) ok++; else bad++; }
-                catch { bad++; }
-            }
-
-            RLog.Detail("读档检查完成：共 " + machines.Count + " 台真实打印机"
-                    + "（认得出来 " + ok + "，认不出 " + bad + "）· 指针白名单 "
-                    + registered + " 条");
-            if (bad > 0)
-                RLog.Error("★★ 有 " + bad + " 台打印机读档后认不出来了，详见上面异常行。");
+            RLog.Detail("读档检查完成：指针白名单 " + registered + " 条（差集清理已执行）。");
         }
         catch (Exception e) { RLog.Warning("读档重挂异常: " + e.Message); }
     }
@@ -169,12 +156,24 @@ public sealed partial class RealPrinterMod
             return false;
         }
 
-        // ★ 回读断言：进没进主仓库要看得见，不能"以为成功了"
+        // ★ 回读断言：进没进主仓库要看得见，不能"以为成功了"。
+        // ★★ V1.4.15：区分「确认不在」与「无法确认」——
+        //   回读本身抛异常时 item 可能其实已进仓（仓库持有它），
+        //   此时销毁 = 仓库持悬空引用（比不销毁危险得多）。
+        //   两种结论：
+        //     · 回读成功且未找到  → 确认不在 → 安全销毁
+        //     · 回读本身抛异常    → 无法确认 → 保留物品、只注销白名单
         bool landed = false;
+        bool readbackOk = true;
         try
         {
             var all = warehouse.childItems;   // ★ GameInventory 没 AllItems，childItems 才是
-            if (all != null)
+            if (all == null)
+            {
+                readbackOk = false;
+                RLog.Warning("回读主仓库：childItems 为 null，无法确认物品是否入仓。");
+            }
+            else
             {
                 IntPtr p = item.Pointer;
                 for (int i = 0; i < all.Count; i++)
@@ -184,13 +183,27 @@ public sealed partial class RealPrinterMod
                 }
             }
         }
-        catch (Exception e) { RLog.Msg("回读主仓库异常: " + e.Message); }
+        catch (Exception e)
+        {
+            readbackOk = false;
+            RLog.Warning("回读主仓库异常（无法确认物品是否入仓）: " + e.Message);
+        }
 
         if (!landed)
         {
+            if (!readbackOk)
+            {
+                // ★ 无法确认 —— 保留物品，只注销白名单（防死指针被热路径命中）。
+                //   ★ 若该机器其实已入仓，下次读档扫存档时会重新认回（identifier + tag 都在）。
+                RLog.Error("⚠ " + what + " 回读失败，无法确认是否入仓。"
+                          + "已从登记表注销，**不销毁**（避免仓库持悬空引用）。"
+                          + "若它其实已入仓，下次读档会被自动重新认回。");
+                UnregisterMachine(item);
+                return false;
+            }
+
+            // ★ 确认不在 —— 安全销毁
             RLog.Error("✘ " + what + " 放入后回读主仓库没找到它 —— 判定为发放失败。");
-            // ★ V1.3.1：状态不明的机器绝不能留在登记表里 ——
-            //   它可能已被游戏收走/销毁，指针随时悬空。注销 + 销毁，两头都做。
             UnregisterMachine(item);
             try { item.Destroy(); } catch (Exception ex) { RLog.Swallowed("TryGiveToWarehouse", ex); }
             return false;
