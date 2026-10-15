@@ -14,11 +14,16 @@
 //   → 连带砍掉：白名单表 92 条、永久黑名单 343 条、汉化词典 1169 行、
 //     恢复链、裸指针安全模式、派生值监视、筛选档位、F1~F12 共 10 个排障热键。
 //
-// 【许可：只对四类物品开放】核桃 2026-10-03 拍板
-//   香烟 / 化学品（含毒药）/ 金属锭 / 免疫宁注射器。
-//   判定**只认 category**，不写死物品名单：
+// 【许可：开放范围】
+//   V1.4.x：只对四类开放（香烟 / 化学品（含毒药）/ 金属锭 / 免疫宁注射器）。
+//   ★★ V1.5.0（核桃要求"能改红色标签打印机支持改的商品"）：改成
+//       **游戏官方档位目录里存在的全部类别（16 类）**，是红机范围的超集。
+//   【红机真实口径（反汇编 LabelerHelper.CanEditLabel @ RVA 0x4B78D0）】
+//       category ∈ {INGOT_PURITY, EQUIPMENT_CONDITION, WINE_QUALITY} → 不给改，其余放行。
+//       → 本机取超集（连金属锭一起给），不砍老功能。
+//   【仍然只认 category，不写死物品名单】
 //     - 好处：游戏加新物品自动支持，永不漏；不用核桃报 id。
-//     - 依据：category 由游戏自己在运行时给出（官方档位目录自省），
+//     - 依据：category 由游戏自己在运行时给出（ItemConditionList 16 张静态表自省），
 //       与物品名字/模型无关 —— 换个皮同款物品照样认得出。
 //   ⚠ 游戏真值体系**只有 16 个 category，没有"毒药"这一类**
 //     → 毒药按"身上有没有化学品纯度真值"判定（核桃拍板：归入化学品）。
@@ -50,6 +55,8 @@ public sealed partial class RealPrinterMod
         public MelonPreferences_Entry<bool> SupplierStockEntry;
         // ★ V1.4.12：恢复 F6 直领 cfg 开关
         public MelonPreferences_Entry<bool> EnableF6GiveEntry;
+        // ★ V1.5.0：拖动触发开关
+        public MelonPreferences_Entry<bool> DragToUseEntry;
         // （其余 Entry 字段保留，走硬编码默认值）
         public MelonPreferences_Entry<int> DealerPriceEntry;
         public MelonPreferences_Entry<int> GiveMachineHotkeyEntry;
@@ -111,6 +118,17 @@ public sealed partial class RealPrinterMod
         public static bool EnableF6Give = false;
 
         /// <summary>
+        /// ★★ V1.5.0：左键**拖动**机器到商品上是否触发改值窗（与原版红机一致）。
+        ///
+        /// 【为什么做成开关】拖动落点是全项目唯一有过 AccessViolation 实机记录的
+        ///   路径（V1.1.9 之前靠 `IsDraggingNow()` 整条短路来防）。
+        ///   V1.5.0 改成"压到拖动结束后的下一帧再开窗"来同时满足「能拖」和「不崩」，
+        ///   但真要是在某台机器上仍然出状况，玩家可以**面板一键关掉**，
+        ///   不用卸载 mod —— 关掉后退回 V1.4.x 行为（拖动不触发，先装备再左键点）。
+        /// </summary>
+        public static bool DragToUse = true;
+
+        /// <summary>
         /// ★★ V1.3.0：同行柜台上那台机器的**售价**（核桃 2026-10-03 拍板：**100**）。
         /// 【口径】直接写进机器的 `unitValue` / `unitBaseValue`，让游戏自己算买价
         ///   （`PlayerStore.CanBuyItemFromTable` 内部用的是 `GameItem.GetNegociatedValue()`）。
@@ -159,6 +177,11 @@ public sealed partial class RealPrinterMod
         _cfg.EnableF6GiveEntry = cat.CreateEntry("EnableF6Give",
             Config.EnableF6Give,
             "F6 直领：打开后按 F6 领取一台价值 0 的真实打印机（防刷钱）。关闭时不响应。");
+        // ★ V1.5.0：拖动触发开关（默认开）。
+        _cfg.DragToUseEntry = cat.CreateEntry("DragToUse",
+            Config.DragToUse,
+            "拖动触发：打开后，把真实打印机拖到商品上即可开窗（与原版红机一致）。"
+            + "关闭则退回旧用法：先使用/装备，再左键点商品。");
 
         // ───── 全部注册完毕，统一读取 ─────
         Config.FeatureCost = _cfg.FeatureCostEntry.Value;
@@ -166,6 +189,8 @@ public sealed partial class RealPrinterMod
         Config.SupplierStock = ReadFlag(_cfg.SupplierStockEntry, Config.SupplierStock);
         // ★ V1.4.12：读 F6 开关
         Config.EnableF6Give = ReadFlag(_cfg.EnableF6GiveEntry, Config.EnableF6Give);
+        // ★ V1.5.0：读拖动触发开关
+        Config.DragToUse = ReadFlag(_cfg.DragToUseEntry, Config.DragToUse);
         // ★ V1.4.6：Config.EnableF6Give / Config.DealerPrice / HotkeyGive
         //   不再从 cfg 读取 —— Cfg 类里对应的 Entry 字段恒为 null，
         //   直接保留 Config 类里的硬编码默认值。
@@ -184,6 +209,8 @@ public sealed partial class RealPrinterMod
                 (oldV, newV) => { Config.SupplierStock = newV; });
             _cfg.EnableF6GiveEntry.OnEntryValueChanged.Subscribe(
                 (oldV, newV) => { Config.EnableF6Give = newV; });
+            _cfg.DragToUseEntry.OnEntryValueChanged.Subscribe(
+                (oldV, newV) => { Config.DragToUse = newV; });
         }
         catch (Exception ex) { RLog.Swallowed("CfgHotReload", ex); }
 
@@ -200,7 +227,7 @@ public sealed partial class RealPrinterMod
         //   "cfg 缺条目"和"功能没生效"是两回事，必须分开报。
         try
         {
-            const int expected = 4;    // V1.4.12：F6 开关加回 → 4 项
+            const int expected = 5;    // V1.5.0：拖动触发开关 → 5 项
             int actual = cat.Entries.Count;
             if (actual < expected)
                 RLog.Error("★★ cfg 条目不完整（" + actual + "/" + expected
@@ -265,6 +292,46 @@ public sealed partial class RealPrinterMod
     public const string ImportantTag = "IMPORTANT_TAG";
     public const string MagnifierTag = "MAGNIFYING_GLASS";
 
+    /// <summary>
+    /// ★★ V1.5.0：工具箱入箱 tag。
+    /// 【取证】`ToolboxHelper.<InitToolbox>b__2`（RVA 0x5182F0，槽位过滤）与
+    ///   `ToolboxHelper.IsToolboxCompatible`（RVA 0x514010，UI 提示）共用同一张白名单：
+    ///     IsGameItemType("TOOL") || IsGameItemType("MELEE_WEAPON")
+    ///     || IsTag("CAN_USE_ON_NON_OWNED_TAG") || IsTag("TOOLBOX_ITEM_TAG")
+    ///     || identifier == "labeler" || identifier == "labeler_blue"
+    ///   原版红机能进工具箱靠的是 `identifier == "labeler"` 这条 id 特判；
+    ///   本机 identifier 是 "real_printer"，走不通 → 必须自己挂 TOOLBOX_ITEM_TAG。
+    ///   ★ 为什么选它而不是 CAN_USE_ON_NON_OWNED_TAG：后者还带"可对非自有物品
+    ///     使用"的语义（放大镜用它），会**改变交互口径**；TOOLBOX_ITEM_TAG 语义
+    ///     就是"工具箱里装的工具"，是最小影响面的一条。
+    /// </summary>
+    public const string ToolboxItemTag = "TOOLBOX_ITEM_TAG";
+
+    /// <summary>
+    /// ★ V1.5.0：容器通用标记（`CONTAINER_TAG`）。
+    /// 【取证】`ContainerHelper.InitContainerItem`（RVA 0x8AC920）与
+    ///   `InitContainerItemTagOnly`（0x8AC8B0）都会给容器打它；
+    ///   `ToolboxHelper.InitToolbox`（0x513970）也打。
+    ///   → 拖动时碰到带它的目标，本机**不接管**，把交互让回游戏的放置逻辑
+    ///     （否则打印机永远放不进工具箱/档案箱，只会被当成"对它使用"）。
+    /// </summary>
+    public const string ContainerTag = "CONTAINER_TAG";
+
+    /// <summary>
+    /// ★★ V1.5.0：档案箱（dossier）入箱 tag —— **这条是靠 MAGNIFYING_GLASS**。
+    /// 【取证】`MiscItemDirectory.Dossier`（RVA 0x70DFB0）末尾调用
+    ///   `ContainerHelper.AllowOnlyTaggedItemsOr(inv, tags, ownedOnly:true)`，
+    ///   tags 四个元素经 str xref 逐条核对为：
+    ///     DOCUMENT / MAGNIFYING_GLASS / LABELER / LABELER_BLUE
+    ///   红机身上没有 "LABELER" tag（只有 LABELER_TAG），**它靠的是
+    ///   MAGNIFYING_GLASS 进的档案箱** —— 放大镜同理。
+    ///   本机 V1.4.x 建机时漏挂了 MAGNIFYING_GLASS → 档案箱拒收。
+    ///   → 挂回它即恢复。★ 注意：全库 xref 显示没有任何
+    ///     `IsTag("MAGNIFYING_GLASS")` 的运行时闸门，它只当"族谱标记/白名单"用，
+    ///     挂回去不会改变任何交互语义（不会让本机变成放大镜）。
+    /// </summary>
+    public const string DossierTag = MagnifierTag;
+
     /// <summary>建机用的目录模板 id（原版红机同款，借它的 sprite）。</summary>
     public const string TemplateItemId = "labeler";
 
@@ -272,7 +339,7 @@ public sealed partial class RealPrinterMod
     public const string ToolAtlasPath = "Items/items_tool";
 
     /// <summary>本 mod 版本号（横幅与排障日志都要打，核桃靠它确认跑的是哪一版）。</summary>
-    public const string SuiteVersion = "1.4.15";
+    public const string SuiteVersion = "1.5.0";
 
     // ═══════════════════════════════════════════════════════════
     // 日志：所有输出走这里，方便排障时统一关掉。
@@ -545,7 +612,7 @@ public sealed partial class RealPrinterMod
     }
 
     // ═══════════════════════════════════════════════════════════
-    // 许可：只对五类物品开放改真值
+    // 许可：开放"游戏官方档位目录里有档位"的全部类别（V1.5.0 起 16 类）
     // ═══════════════════════════════════════════════════════════
     public static class License
     {
@@ -567,14 +634,39 @@ public sealed partial class RealPrinterMod
         ///     拿到的字符串 100% 与游戏一致，我一个字符都不用猜。
         ///     手写串只作为"读不到时的兜底"，且自检会报警。
         /// </summary>
+        // ★★ V1.5.0：从"手写 4 类"改成 **游戏 16 张分类档位表全取**。
+        //
+        // 【为什么改】核桃要"能改红色标签打印机支持改的商品"。
+        //   反汇编 `LabelerHelper.CanEditLabel`（RVA 0x4B78D0）得到红机的口径：
+        //       category ∈ {CATEGORY_INGOT_PURITY, CATEGORY_EQUIPMENT_CONDITION,
+        //                   CATEGORY_WINE_QUALITY} → false（红机不给改）
+        //       其余一律 true
+        //   → 红机放行的类别是"除这三类之外的全部"。
+        //   【本机取**超集**，不砍金属锭】金属锭是本机老功能（README 头条），
+        //     核桃只说"增加"，没说移除 → 保留。于是本机许可 = 全部 16 类。
+        //   【为什么不手写这 16 个字符串】手写 = 打错一个字就静默开不了窗
+        //     （V0.5.18 同款事故）。这里一张表都不写死，全从游戏静态表读。
         private static readonly Dictionary<string, Func<Il2CppSystem.Collections.Generic.List<ItemCondition>>> _catListAccessors
             = new Dictionary<string, Func<Il2CppSystem.Collections.Generic.List<ItemCondition>>>(StringComparer.OrdinalIgnoreCase)
         {
-            // 键 = 语义标签（我自己的，不参与游戏判定）；值 = 游戏自己的档位表
+            // 键 = 语义标签（我自己的，只用于给玩家看的中文名，不参与游戏判定）
+            // 值 = 游戏自己的分类档位表（dump.cs:40775 `ItemConditionList` 全部 16 张）
             { "香烟",     () => ItemConditionList.conditionGenuineCigarette },
             { "化学品",   () => ItemConditionList.conditionChemicalPurity },
             { "金属锭",   () => ItemConditionList.conditionIngotPurity },
             { "注射器",   () => ItemConditionList.conditionGenuineInjector },
+            { "印花票",   () => ItemConditionList.conditionGenuineStamp },
+            { "效期",     () => ItemConditionList.conditionExpired },
+            { "水",       () => ItemConditionList.conditionWaterPurity },
+            { "酒",       () => ItemConditionList.conditionWineQuality },
+            { "装备成色", () => ItemConditionList.conditionEquipmentCondition },
+            { "新鲜度",   () => ItemConditionList.conditionFoodFreshness },
+            { "凹陷",     () => ItemConditionList.conditionDented },
+            { "生锈",     () => ItemConditionList.conditionRusted },
+            { "已开封",   () => ItemConditionList.conditionOpenBox },
+            { "仿制品",   () => ItemConditionList.conditionReplica },
+            { "赠品",     () => ItemConditionList.conditionFree },
+            { "模块卡死", () => ItemConditionList.conditionModuleStuck },
         };
 
         /// <summary>语义标签 → 游戏真实 category 名（启动时填充）。</summary>
@@ -589,6 +681,18 @@ public sealed partial class RealPrinterMod
             { "化学品",   "CATEGORY_CHEMICAL_PURITY" },
             { "金属锭",   "CATEGORY_INGOT_PURITY" },
             { "注射器",   "CATEGORY_GENUINE_INJECTOR" },
+            { "印花票",   "CATEGORY_GENUINE_STAMP" },
+            { "效期",     "CATEGORY_EXPIRED" },
+            { "水",       "CATEGORY_WATER_PURITY" },
+            { "酒",       "CATEGORY_WINE_QUALITY" },
+            { "装备成色", "CATEGORY_EQUIPMENT_CONDITION" },
+            { "新鲜度",   "CATEGORY_FRESHNESS" },
+            { "凹陷",     "CATEGORY_DENTED" },
+            { "生锈",     "CATEGORY_RUSTED" },
+            { "已开封",   "CATEGORY_OPEN_BOX" },
+            { "仿制品",   "CATEGORY_REPLICA" },
+            { "赠品",     "CATEGORY_FREE" },
+            { "模块卡死", "CATEGORY_MODULE_STUCK" },
         };
 
         // ★★ V1.4.15：`_catResolved` 语义改为「已确定」——
@@ -652,26 +756,56 @@ public sealed partial class RealPrinterMod
             return true;
         }
 
-        /// <summary>本次许可真正放行的 category 名集合。</summary>
-        private static HashSet<string> BuildAllowedSet()
+        // ═══════════════════════════════════════════════════════════
+        // ★★ V1.5.0：许可判据改成「官方档位目录里有没有这一类的档位」
+        //
+        // 【为什么不能再拿 _catRealNames 当许可集合】_catRealNames 是**为显示中文名**
+        //   才去读的 16 张分类静态表；它和 56 个工厂产出的 category 是**两套数据源**，
+        //   只要任何一处命名对不上（比如静态表叫 CATEGORY_FOOD_FRESHNESS、
+        //   工厂产出 CATEGORY_FRESHNESS），许可集合就会漏掉一整类 —— 而
+        //   `SelfCheckLicense` 还会为此在每次启动时刷一条红字。
+        //
+        // 【改成什么】许可 = `_byCat.Keys`（官方档位目录的类别键）。
+        //   ① **与候选同源**：能许可 ⇒ 一定有候选；不可能出现"开窗是空的"。
+        //   ② **自检不可能误报**：集合由目录构造而来，逐项反查必然命中。
+        //   ③ **更快**：一次 HashSet 查找，不需要先解析 16 张静态表。
+        //   ④ **更准的语义**：本机真正的边界就是"游戏给这类东西配没配档位"。
+        // ═══════════════════════════════════════════════════════════
+        private static HashSet<string> _allowed;
+
+        /// <summary>许可集合（官方档位目录的类别键）。目录没建好时返回 null 且不缓存，允许下次重试。</summary>
+        private static HashSet<string> AllowedSet()
         {
-            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var v in _catRealNames.Values) set.Add(v);
-            return set;
+            var s = _allowed;
+            if (s != null) return s;
+
+            EnsureCatalog();
+            if (_byCat == null || _byCat.Count == 0) return null;
+
+            s = new HashSet<string>(_byCat.Keys, StringComparer.OrdinalIgnoreCase);
+            _allowed = s;
+            return s;
         }
 
         /// <summary>
-        /// ★ 许可类别自检：每个许可 category 在官方档位目录里**必须真的有档位**。
+        /// ★ 许可自检（启动时跑一次）。
         ///
-        /// 【为什么必须查】许可类别名现在是从游戏表读出来的（不手打），
-        ///   但"这个类别到底有没有官方档位"仍是运行时才知道的事实。
-        ///   对不上的后果：玩家点开这类商品 → 窗口里一条候选都没有 →
-        ///   而界面只说"可选档位 0"，看起来像坏了。
-        ///   → 启动时就报出来，别等玩家遇到。
+        /// 【查两件事】
+        ///   ① 每个许可 category 在官方档位目录里**必须真的有档位**。
+        ///      V1.5.0 起许可集合就是目录的键，这条按构造必然成立 ——
+        ///      留着是防将来有人又把许可换成手写名单（那正是 V0.5.18 的事故形态）。
+        ///   ② ★ V1.5.0 新增：16 张分类静态表**读回来几个真名**。
+        ///      它决定玩家看到的类别名是中文还是一串 CATEGORY_ 英文。
+        ///      以前这条藏在"许可解析"里，V1.5.0 把许可拆走后就没人查了 ——
+        ///      必须补上，否则中文名全丢也一行日志都没有。
         /// </summary>
         internal static List<string> SelfCheckLicense()
         {
             var bad = new List<string>();
+
+            // ★ 启动时就把类别真名表定下来（中文名要用），别等到第一次开窗
+            ResolveCategoryNames();
+
             var allowed = AllAllowed();
             for (int i = 0; i < allowed.Length; i++)
             {
@@ -681,13 +815,21 @@ public sealed partial class RealPrinterMod
                     bad.Add("许可类别 " + cat
                             + " 在游戏官方档位目录里没有对应档位 → 这类商品开窗会是空的。");
             }
+
+            if (_catRealNames.Count == 0)
+                bad.Add("类别中文名表为空 —— 16 张 ItemConditionList 分类表全读不到，"
+                        + "界面上会显示 CATEGORY_ 英文原名（功能不受影响）。");
+            else if (_catRealNames.Count < _catListAccessors.Count)
+                bad.Add("类别中文名只解析出 " + _catRealNames.Count + "/"
+                        + _catListAccessors.Count + " 条 —— 未命中的那些会显示 CATEGORY_ 英文原名。");
+
             return bad;
         }
 
-        // ── 未许可类别的中文名表（代码评审 P1-5：switch → Dictionary）──
-        // ★ 只覆盖**不在许可内**的类别 —— 许可内的四个已由 _catRealNames 自动填好
-        //   （从游戏自己的分类档位表读，零猜测）。
-        //   这张表只在"玩家点了不支持的东西、我要告诉他这是啥"时用。
+        // ── 类别中文名兜底表（代码评审 P1-5：switch → Dictionary）──
+        // ★ V1.5.0：16 类已全部由 _catRealNames 自动填好（读游戏分类档位表，零猜测），
+        //   这张表现在只兜"游戏新增的、还没进 16 张静态表"的类别。
+        //   用途不变：玩家点了个没法改的东西，我要用人话告诉他那是什么。
         // ★ 用 Dictionary 而不是 switch：加一条只要写一行，且不会漏 default 分支。
         private static readonly Dictionary<string, string> _labelByCat
             = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
@@ -711,7 +853,12 @@ public sealed partial class RealPrinterMod
         {
             if (string.IsNullOrEmpty(cat)) return "未知类别";
 
-            // ① 优先用**从游戏表读回来的真实名**反查（许可内的四类走这条）
+            // ★ V1.5.0：许可判据已改走官方档位目录（AllowedSet），不再顺带触发
+            //   类别名解析 —— 这里必须**自己**确保表已填好，否则中文名永远查不到
+            //   （又一个"两个功能共用一次初始化"的隐性耦合，拆开了就得各自保证）。
+            ResolveCategoryNames();
+
+            // ① 优先用**从游戏表读回来的真实名**反查（16 类走这条）
             foreach (var kv in _catRealNames)
             {
                 if (string.Equals(kv.Value, cat, StringComparison.OrdinalIgnoreCase))
@@ -722,31 +869,20 @@ public sealed partial class RealPrinterMod
             return _labelByCat.TryGetValue(cat, out label) ? label : cat;
         }
 
-        private static HashSet<string> _allowed;
-
         public static bool IsAllowed(string cat)
         {
             if (string.IsNullOrEmpty(cat)) return false;
-            if (_allowed == null)
-            {
-                // ★★ V1.4.15：只有 ResolveCategoryNames 返回 true 时才锁缓存。
-                //   重试期间（返回 false）不缓存 —— 下次调用会再试一次。
-                if (!ResolveCategoryNames()) return false;
-                _allowed = BuildAllowedSet();
-            }
-            return _allowed.Contains(cat);
+            var s = AllowedSet();
+            return s != null && s.Contains(cat);
         }
 
         /// <summary>全部许可 category 名（横幅/自检用）。</summary>
         public static string[] AllAllowed()
         {
-            if (_allowed == null)
-            {
-                if (!ResolveCategoryNames()) return Array.Empty<string>();
-                _allowed = BuildAllowedSet();
-            }
-            var a = new string[_allowed.Count];
-            _allowed.CopyTo(a);
+            var s = AllowedSet();
+            if (s == null) return Array.Empty<string>();
+            var a = new string[s.Count];
+            s.CopyTo(a);
             return a;
         }
 
@@ -786,15 +922,19 @@ public sealed partial class RealPrinterMod
 
             if (rawCount == 0)
                 return "「" + DisplayNameOf(target) + "」身上没有任何可验证的特性"
-                     + "（这台打印机只改真值：验真、纯度、可不可用）。";
+                     + "（这台打印机只改真值：验真、纯度、可不可用、成色…）。";
 
             if (cats.Count == 0)
                 return "「" + DisplayNameOf(target) + "」的真值特性无法识别（类别为空），无法处理。";
 
+            // ★ V1.5.0：许可已扩到"游戏官方档位目录里有的全部类别"（16 类），
+            //   所以走到这里的唯一原因是：**这个 category 在官方目录里没有档位**
+            //   —— 不是"我不让你改"，是"游戏自己没给这类东西配档位"。
+            //   → 文案必须说准，否则玩家会以为是权限问题（MEMORY：静默/含糊最坏）。
             var parts = new List<string>();
             foreach (var c in cats) parts.Add(CategoryLabel(c));
-            return "「" + DisplayNameOf(target) + "」属于「" + string.Join(" / ", parts.ToArray())
-                 + "」，这台打印机不支持。\n★ 只支持：香烟 / 化学品 / 金属锭 / 注射器。";
+            return "「" + DisplayNameOf(target) + "」的真值属于「" + string.Join(" / ", parts.ToArray())
+                 + "」—— 游戏官方档位目录里没有这一类的档位，本机无从改写。";
         }
     }
 }
