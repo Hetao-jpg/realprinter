@@ -1,7 +1,7 @@
 // ═══════════════════════════════════════════════════════════
 // ★ 真实打印机 RealPrinter —— Mod 入口
 //
-// 【一句话】只改商品真值（验真/纯度/可不可用）的打印机，限五类物品。
+// 【一句话】只改商品真值的打印机：官方档位目录里有的类别都能改，真值假值一起写。
 //
 // 【与 BlackPrinter 共存】两者 identifier / 专属 tag 全部错开，
 //   可以同时安装、互不抢机器（详见 Core 里的常量说明）。
@@ -266,8 +266,23 @@ public sealed partial class RealPrinterMod : MelonMod
     /// </summary>
     public override void OnUpdate()
     {
-        if (!Config.EnableF6Give) return;
-        try { PollHotkeys(); }
+        // ★★ V1.5.0：F6 与拖动落点两条每帧路径**各自独立判空**。
+        //   【为什么不能像 V1.4.x 那样 `if (!Config.EnableF6Give) return;` 在第一行】
+        //     那会让"拖动落点队列"在 F6 关着（默认就是关）时**永远得不到执行**
+        //     → 拖动功能整体失效。两条路径互不依赖，必须分开判。
+        //   【性能】两道闸都只是读静态 bool；两个功能都关着时每帧开销 = 两次 bool 读。
+        if (Config.EnableF6Give)
+        {
+            try { PollHotkeys(); }
+            catch (Exception ex) { RLog.Swallowed("OnUpdate", ex); }
+        }
+
+        // ★ 拖动状态每帧采样一次（必须排在 TickPendingDrop 之前，见其注释）
+        try { SampleDragState(); }
+        catch (Exception ex) { RLog.Swallowed("OnUpdate", ex); }
+
+        // 拖动落点：内部 `_pendingDrop == null` 时立即返回（常态零开销）
+        try { TickPendingDrop(); }
         catch (Exception ex) { RLog.Swallowed("OnUpdate", ex); }
     }
 
@@ -288,12 +303,22 @@ public sealed partial class RealPrinterMod : MelonMod
     {
         RLog.Msg("══════ 真实打印机 RealPrinter v" + SuiteVersion + " ══════");
 
-        var labels = new System.Collections.Generic.List<string>();
+        // ★ V1.5.0：许可从 4 类扩到 16 类 —— 再把 16 个中文名全拼进一行横幅
+        //   就成噪音了（核桃要求"少输出工作日志"）。
+        //   → 横幅只报**结论**（几类、怎么触发）；完整清单压进 Detail（排障才开）。
         var allowed = License.AllAllowed();
-        foreach (var c in allowed) labels.Add(License.CategoryLabel(c));
-        RLog.Msg("　支持：" + string.Join(" / ", labels.ToArray())
-                + "（毒药按化学品算）");
+        RLog.Msg("　支持：官方档位目录全部 " + allowed.Length + " 类真值"
+                + "（香烟 / 化学品 / 金属锭 / 注射器 / 印花票 / 效期 / 水 / 酒 …，毒药按化学品算）");
+        if (Config.VerboseLog)
+        {
+            var labels = new System.Collections.Generic.List<string>();
+            foreach (var c in allowed) labels.Add(License.CategoryLabel(c));
+            RLog.Detail("　许可类别明细：" + string.Join(" / ", labels.ToArray()));
+        }
 
+        RLog.Msg("　触发：" + (Config.DragToUse
+                    ? "拖到商品上（开）＋ 装备后左键点（开）"
+                    : "装备后左键点（拖动已关）"));
         RLog.Msg("　获取：" + (Config.SupplierStock ? "供货商上货（开）" : "供货商上货（关）"));
         RLog.Msg("　F6 直领：" + (Config.EnableF6Give ? "开（按 F6 领取价值 0 的机器）" : "关"));
         if (Config.SupplierStock)
@@ -321,7 +346,10 @@ public sealed partial class RealPrinterMod : MelonMod
         RLog.Msg("　机器外观：" + RealPrinterSpriteRescale.Report()
             + "（形状 1×2 格 = 2 格，柜台放得下）");
 
-        RLog.Msg("　用法：手持机器 → 左键点商品 → 选档位");
+        RLog.Msg("　用法："
+            + (Config.DragToUse
+                ? "把机器拖到商品上（或装备后左键点）→ 选档位"
+                : "手持机器 → 左键点商品 → 选档位"));
         if (!_patched) RLog.Error("★★ Harmony 补丁未挂 —— 左键点物品不会有任何反应。");
         // ★ 被降级处理的异常：默认不打（否则拖动时会刷屏），
         //   但**一旦累计到值得警惕的数量就报出来** —— 让"静默失效"变可见。
