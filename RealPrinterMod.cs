@@ -40,47 +40,22 @@ public sealed partial class RealPrinterMod : MelonMod
         try { InitPreferences(); }
         catch (Exception e) { RLog.Error("cfg 挂载异常（用默认值继续）: " + e.Message); }
 
-        // —— 官方档位目录自检 ——
-        //★★★ 面向用户版也保留自检：这一环是"改了没反应"的唯一防线。
-        //   它验的是「候选列表里的每个档位都真能拿到游戏官方对象」。
-        //   BlackPrinter V0.5.18 就栽在这 —— 我手写的候选名游戏根本不存在，
-        //   编译期不报，实机只表现为价格不动 + 显示英文（核桃实机截图实锤）。
-        try
-        {
-            // ★ 显式先建目录：许可类别名要从游戏自己的分类档位表里读，
-            //   那些静态列表由 .cctor 填充 —— 必须排在目录建立之后。
-            //   （顺序错了会读到空表，然后许可永远开不了窗。）
-            BuildConditionCatalogOnce();
-            var bad = SelfCheckConditionCatalog();
-            if (bad.Count > 0)
-                RLog.Error("★★ 官方档位自检发现 " + bad.Count + " 处问题（改真值可能不可用）：\n"
-                          + string.Join("\n", bad.ConvertAll(x => "    · " + x)));
-            else
-                RLog.Detail("官方档位自检通过（" + ConditionCatalogCount() + " 档全部可解析）。");
-        }
-        catch (Exception e) { RLog.Error("★★ 官方档位自检异常: " + e.Message); }
-
-        // —— 许可类别自检 ——
-        //★★★ 面向用户版唯一的"开关"，错了整台机器就白给，必须机器查。
-        //   每个许可 category 必须**在官方目录里真的有档位**，
-        //   否则玩家点开只会看到"没有可选档位"。
-        // ★★ V2：返回值分两级 —— functional → Error；cosmetic（显示降级）→ Warning。
-        //   旧版把"类别中文名没读全"也打成 Error，玩家**每次启动看到红字**，
-        //   以为 mod 坏了（其实功能一点不受影响）。误报比不报更坏。
-        try
-        {
-            License.SelfCheckLicense(out var funcBad, out var cosBad);
-            if (funcBad.Count > 0)
-                RLog.Error("★★ 许可类别自检发现 " + funcBad.Count + " 处功能问题"
-                           + "（这些类别开不了窗）：\n"
-                           + string.Join("\n", funcBad.ConvertAll(x => "    · " + x)));
-            if (cosBad.Count > 0)
-                RLog.Warning("⚠ 许可显示降级（不影响功能）：\n"
-                           + string.Join("\n", cosBad.ConvertAll(x => "    · " + x)));
-            if (funcBad.Count == 0 && cosBad.Count == 0)
-                RLog.Detail("许可类别自检通过（" + License.AllAllowed().Length + " 类均有官方档位）。");
-        }
-        catch (Exception e) { RLog.Error("★★ 许可类别自检异常: " + e.Message); }
+        // —— 官方档位自检 / 许可自检（V1.5.2 起★★ 延迟 ★★执行，不在这里跑）——
+        //★★★ 2026-10-16 事故（实机实锤）：这两段自检原来就在这里（启动期）跑，
+        //   而它们（`BuildConditionCatalogOnce` 的 56 个工厂 + `SelfCheckLicense`
+        //   读 16 张分类静态表）都会触碰游戏 `ItemConditionList` —— 于是本 mod
+        //   成了**全场第一个**触发该类 .cctor 的代码。而该 .cctor 内部要取
+        //   本地化文本（LocHelper.Get → Addressables），启动早期本地化未就绪
+        //   → cctor 抛 `invalid operation handle` 且**构造失败被永久缓存**
+        //   （同 .NET 语义，TypeInitializationException）→ 本地化 / 物品系统
+        //   连锁瘫痪：主菜单变英文、读档失败。
+        //   【为什么不能靠"失败重试"救】类型构造失败在 il2cpp 里是一次性的，
+        //   本场无法补救 —— 唯一修法就是**不去当第一个**。
+        //   【搬去哪了】两段自检整体搬进 `ConditionCatalog.EnsureCatalog` 的
+        //   ★懒建成功路径★（`RunPostBuildSelfChecksOnce`）：首次建表发生在玩家
+        //   进游戏后第一次触发许可/开窗，那时游戏早已自己初始化完该类。
+        //   日志内容一字未改（①官方档位自检 ②许可类别自检，Error/Warning
+        //   分级照旧），只是从"启动日志末尾"挪到"目录首次就绪之后"。
 
         // —— 拖动采样机制（V2-7）——
         // ★ "这套机制到底有没有在跑"必须可查：拖动采样一旦静默失效，
@@ -315,15 +290,12 @@ public sealed partial class RealPrinterMod : MelonMod
         // ★ V1.5.0：许可从 4 类扩到 16 类 —— 再把 16 个中文名全拼进一行横幅
         //   就成噪音了（核桃要求"少输出工作日志"）。
         //   → 横幅只报**结论**（几类、怎么触发）；完整清单压进 Detail（排障才开）。
-        var allowed = License.AllAllowed();
-        RLog.Msg("　支持：官方档位目录全部 " + allowed.Length + " 类真值"
-                + "（香烟 / 化学品 / 金属锭 / 注射器 / 印花票 / 效期 / 水 / 酒 …，毒药按化学品算）");
-        if (Config.VerboseLog)
-        {
-            var labels = new System.Collections.Generic.List<string>();
-            foreach (var c in allowed) labels.Add(License.CategoryLabel(c));
-            RLog.Detail("　许可类别明细：" + string.Join(" / ", labels.ToArray()));
-        }
+        // ★★ V1.5.2：横幅**不许再现场读许可目录**（`License.AllAllowed` →
+        //   EnsureCatalog → 游戏 ItemConditionList）—— 横幅跑在启动期，读了就是
+        //   2026-10-16 事故的第二个触发点（详见 OnInitializeMelon 顶部注释）。
+        //   → 改成静态文案；类别计数/明细由延迟自检在目录首次就绪后报。
+        RLog.Msg("　支持：官方档位目录里的全部类别"
+                + "（香烟 / 化学品 / 金属锭 / 注射器 / 印花票 / 效期 / 酒 …，毒药按化学品算；水不支持）");
 
         RLog.Msg("　触发：" + (Config.DragToUse
                     ? "拖到商品上（开）＋ 装备后左键点（开）"

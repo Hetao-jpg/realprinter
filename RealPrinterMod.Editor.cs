@@ -611,6 +611,13 @@ public sealed partial class RealPrinterMod
             return;
         }
 
+        // ★ 赃物标记：真值已改成功（回读已通过），扣费之前打
+        if (Config.MarkStolenOnEdit)
+        {
+            try { MarkItemStolen(sess.Target); }
+            catch (Exception e) { RLog.Warning("打赃物标记异常: " + e.Message); }
+        }
+
         if (!Pay.TryCharge(cost, out string why))
         {
             Inform("扣费失败（" + why + "）。改动已生效但没扣到钱 —— 请报我。", "yellow");

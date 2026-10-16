@@ -2,7 +2,8 @@
 // ★ 官方档位目录 —— 「游戏到底有哪些档位、各值多少」的唯一来源
 //
 // 【本文件管什么】
-//   启动时把 56 个 `ItemConditionList.Create*` 全跑一遍，建成
+//   首次用到时（**懒建**，V1.5.2 起不再在启动期建表）把 56 个
+//   `ItemConditionList.Create*` 全跑一遍，建成
 //   「档位 id → 官方对象信息」与「category → 档位列表」两张索引。
 //   候选列表、写入、加价、中文名**全部**来自这两张表。
 //
@@ -182,14 +183,13 @@ public sealed partial class RealPrinterMod
         _catalogTried = false;                 // 允许下次调用再试
     }
 
-    /// ★ V0.5.19：把 56 个官方工厂全跑一遍，建索引。**只跑一次**，之后读缓存。
-    ///   ★ 任何一步失败都不抛—— 返回空表，调用方按"候选未知"处理（自由输入兜底）。
-    internal static void BuildConditionCatalogOnce()
-    {
-        EnsureCatalog();
-    }
+    // ★★ V1.5.2：原 `BuildConditionCatalogOnce()`（显式启动期建表）已删除 ——
+    //   它让本 mod 在启动期抢在游戏自己之前触碰 `ItemConditionList`，是
+    //   2026-10-16 事故的元凶（详见 RealPrinterMod.cs 的 OnInitializeMelon 顶部）。
+    //   现在目录**只走懒建**：许可判定 / 开窗 / 写入时经由 `EnsureCatalog` 现建，
+    //   此时游戏早已自己初始化完该类。自检同理，见 `RunPostBuildSelfChecksOnce`。
 
-    /// <summary>官方档位总数（横幅/自检用）。</summary>
+    /// <summary>官方档位总数（延迟自检用，V1.5.2 起横幅不再读它）。</summary>
     internal static int ConditionCatalogCount()
     {
         EnsureCatalog();
@@ -304,7 +304,8 @@ public sealed partial class RealPrinterMod
                 //     各值多少 —— 那是一次性的调研需求，答案已经写进代码里的
                 //     56 个 `Create*()` 工厂引用了，**再打一遍没有任何信息量**。
                 //   【为什么它当初是 Detail 也仍然刷屏】
-                //     它在 `EnsureCatalog` 的**建表循环里**，而建表是启动必跑的一次。
+                //     它在 `EnsureCatalog` 的**建表循环里**，而建表当时是启动必跑的一次
+                //     （V1.5.2 起改为懒建，但"每次用到前只建一次"的性质不变）。
                 //     56 行 × 每次启动 = 日志里长期占一半篇幅，把真正的报错挤下去。
                 //   【自检已经覆盖了它该发现的问题】
                 //     `SelfCheckConditionCatalog` 逐档验「display 非空」+
@@ -320,6 +321,9 @@ public sealed partial class RealPrinterMod
             //   ★ 保留**计数**（几档 / 几类）—— 那是"目录建起来了没有"的最短证明，
             //     一行就能让"改了没反应"的排障从 10 秒变成 10 秒。
             RLog.Msg("官方档位目录就绪：" + _byId.Count + " 档 / " + _byCat.Count + " 类");
+
+            // ★★ V1.5.2：延迟自检 —— 目录懒建成功后只跑一次（见方法注释）。
+            RunPostBuildSelfChecksOnce();
         }
         catch (Exception e)
         {
@@ -327,6 +331,61 @@ public sealed partial class RealPrinterMod
             _byId = null; _byCat = null;
             AllowCatalogRetry();
         }
+    }
+
+    /// ★★ V1.5.2：延迟自检 —— 目录**懒建成功后**只跑一次。
+    ///
+    /// 【为什么必须搬到这里（2026-10-16 事故实锤）】
+    ///   这两段自检原来在 `OnInitializeMelon` 里跑（启动期），会成为全场第一个
+    ///   触碰游戏 `ItemConditionList` 的代码 —— 该类 .cctor 内部要取本地化文本
+    ///   （LocHelper.Get → Addressables），启动早期本地化未就绪 → cctor 抛
+    ///   `invalid operation handle` 且**构造失败被永久缓存**（同 .NET 语义，
+    ///   TypeInitializationException）→ 本地化 / 物品系统连锁瘫痪：
+    ///   主菜单变英文、读档失败。搬到懒建路径后，首跑时机 = 玩家进游戏后第一次
+    ///   触发许可/开窗，那时游戏早已自己初始化完该类 —— 本 mod 不可能再当"第一个"。
+    ///
+    /// 【功能不减】两条自检的日志内容/分级一字未改（①官方档位自检
+    ///   ②许可类别自检 functional→Error / cosmetic→Warning），只是时间点
+    ///   从"启动日志末尾"挪到"目录首次就绪之后"。
+    ///
+    /// 【为什么挂在 EnsureCatalog 而不是各调用点】全部懒建都汇聚到 EnsureCatalog
+    ///   的成功路径 —— 挂这里一次覆盖所有入口（AllowedSet / 开窗 / 写入），
+    ///   不依赖调用方自觉。
+    private static bool _postBuildChecked;
+
+    private static void RunPostBuildSelfChecksOnce()
+    {
+        if (_postBuildChecked) return;
+        _postBuildChecked = true;   // ★ 先置位：自检自身异常也不重复跑（防刷屏）
+
+        // ① 官方档位目录自检（原 OnInitializeMelon 第一块，逐字沿用）
+        try
+        {
+            var bad = SelfCheckConditionCatalog();
+            if (bad.Count > 0)
+                RLog.Error("★★ 官方档位自检发现 " + bad.Count + " 处问题（改真值可能不可用）：\n"
+                          + string.Join("\n", bad.ConvertAll(x => "    · " + x)));
+            else
+                RLog.Detail("官方档位自检通过（" + ConditionCatalogCount() + " 档全部可解析）。");
+        }
+        catch (Exception e) { RLog.Error("★★ 官方档位自检异常: " + e.Message); }
+
+        // ② 许可类别自检（原 OnInitializeMelon 第二块，逐字沿用；
+        //    分级判据的完整来龙去脉见 License.SelfCheckLicense 的文档注释）
+        try
+        {
+            License.SelfCheckLicense(out var funcBad, out var cosBad);
+            if (funcBad.Count > 0)
+                RLog.Error("★★ 许可类别自检发现 " + funcBad.Count + " 处功能问题"
+                           + "（这些类别开不了窗）：\n"
+                           + string.Join("\n", funcBad.ConvertAll(x => "    · " + x)));
+            if (cosBad.Count > 0)
+                RLog.Warning("⚠ 许可显示降级（不影响功能）：\n"
+                           + string.Join("\n", cosBad.ConvertAll(x => "    · " + x)));
+            if (funcBad.Count == 0 && cosBad.Count == 0)
+                RLog.Detail("许可类别自检通过（" + License.AllAllowed().Length + " 类均有官方档位）。");
+        }
+        catch (Exception e) { RLog.Error("★★ 许可类别自检异常: " + e.Message); }
     }
 
     /// <summary>

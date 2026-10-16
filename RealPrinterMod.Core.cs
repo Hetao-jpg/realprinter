@@ -57,6 +57,9 @@ public sealed partial class RealPrinterMod
         public MelonPreferences_Entry<bool> EnableF6GiveEntry;
         // ★ V1.5.0：拖动触发开关
         public MelonPreferences_Entry<bool> DragToUseEntry;
+        // ★ 改真值后打赃物标记开关
+        public MelonPreferences_Entry<bool> MarkStolenOnEditEntry;
+        public MelonPreferences_Entry<int> MinStolenHeatEntry;
         // （其余 Entry 字段保留，走硬编码默认值）
         public MelonPreferences_Entry<int> DealerPriceEntry;
         public MelonPreferences_Entry<int> GiveMachineHotkeyEntry;
@@ -128,6 +131,11 @@ public sealed partial class RealPrinterMod
         /// </summary>
         public static bool DragToUse = true;
 
+        // 改真值后给目标打赃物标记（原版系统处理安检/拒收/折价/衰减）
+        public static bool MarkStolenOnEdit = true;
+        // Y 方案：按改后价值重算热度；算出来为 0 时的兜底下限（0=不打）
+        public static int MinStolenHeat = 25;
+
         /// <summary>
         /// ★★ V1.3.0：同行柜台上那台机器的**售价**（核桃 2026-10-03 拍板：**100**）。
         /// 【口径】直接写进机器的 `unitValue` / `unitBaseValue`，让游戏自己算买价
@@ -182,6 +190,13 @@ public sealed partial class RealPrinterMod
             Config.DragToUse,
             "拖动触发：打开后，把真实打印机拖到商品上即可开窗（与原版红机一致）。"
             + "关闭则退回旧用法：先使用/装备，再左键点商品。");
+        // ★ 改真值后打赃物标记开关（默认开）。
+        _cfg.MarkStolenOnEditEntry = cat.CreateEntry("MarkStolenOnEdit",
+            Config.MarkStolenOnEdit,
+            "改真值后打赃物标记。开=目标被原版系统当赃物处理；关=只改真值。");
+        _cfg.MinStolenHeatEntry = cat.CreateEntry("MinStolenHeat",
+            Config.MinStolenHeat,
+            "改真值后按改后价值重算热度；为 0 时的兜底下限（0=不打，25=原版最低档，100=必满）。");
 
         // ───── 全部注册完毕，统一读取 ─────
         Config.FeatureCost = _cfg.FeatureCostEntry.Value;
@@ -191,6 +206,10 @@ public sealed partial class RealPrinterMod
         Config.EnableF6Give = ReadFlag(_cfg.EnableF6GiveEntry, Config.EnableF6Give);
         // ★ V1.5.0：读拖动触发开关
         Config.DragToUse = ReadFlag(_cfg.DragToUseEntry, Config.DragToUse);
+        // ★ 读赃物标记开关
+        Config.MarkStolenOnEdit = ReadFlag(_cfg.MarkStolenOnEditEntry, Config.MarkStolenOnEdit);
+        int minHeatRaw = _cfg.MinStolenHeatEntry != null ? _cfg.MinStolenHeatEntry.Value : Config.MinStolenHeat;
+        Config.MinStolenHeat = Math.Max(0, Math.Min(100, minHeatRaw));
         // ★ V1.4.6：Config.EnableF6Give / Config.DealerPrice / HotkeyGive
         //   不再从 cfg 读取 —— Cfg 类里对应的 Entry 字段恒为 null，
         //   直接保留 Config 类里的硬编码默认值。
@@ -211,6 +230,10 @@ public sealed partial class RealPrinterMod
                 (oldV, newV) => { Config.EnableF6Give = newV; });
             _cfg.DragToUseEntry.OnEntryValueChanged.Subscribe(
                 (oldV, newV) => { Config.DragToUse = newV; });
+            _cfg.MarkStolenOnEditEntry.OnEntryValueChanged.Subscribe(
+                (oldV, newV) => { Config.MarkStolenOnEdit = newV; });
+            _cfg.MinStolenHeatEntry.OnEntryValueChanged.Subscribe(
+                (oldV, newV) => { Config.MinStolenHeat = Math.Max(0, Math.Min(100, newV)); });
         }
         catch (Exception ex) { RLog.Swallowed("CfgHotReload", ex); }
 
@@ -227,7 +250,7 @@ public sealed partial class RealPrinterMod
         //   "cfg 缺条目"和"功能没生效"是两回事，必须分开报。
         try
         {
-            const int expected = 5;    // V1.5.0：拖动触发开关 → 5 项
+            const int expected = 7;    // 新增赃物标记开关 → 7 项
             int actual = cat.Entries.Count;
             if (actual < expected)
                 RLog.Error("★★ cfg 条目不完整（" + actual + "/" + expected
@@ -339,7 +362,7 @@ public sealed partial class RealPrinterMod
     public const string ToolAtlasPath = "Items/items_tool";
 
     /// <summary>本 mod 版本号（横幅与排障日志都要打，核桃靠它确认跑的是哪一版）。</summary>
-    public const string SuiteVersion = "1.5.1";
+    public const string SuiteVersion = "1.5.2";
 
     // ═══════════════════════════════════════════════════════════
     // 日志：所有输出走这里，方便排障时统一关掉。
