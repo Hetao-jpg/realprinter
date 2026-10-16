@@ -15,9 +15,8 @@ public sealed partial class RealPrinterMod
         if (!IsSafeTarget(target)) return false;
 
         // 1. 先让原版跑（建立 STOLEN_TAG + 其内部副作用）
-        bool vanillaOk = true;
         try { StolenHelper.InitStolenItem(target, -1); }
-        catch (Exception e) { vanillaOk = false; RLog.Warning("★ InitStolenItem 异常（继续走我方重算）: " + e.Message); }
+        catch (Exception e) { RLog.Warning("★ InitStolenItem 异常（继续走我方重算）: " + e.Message); }
 
         // 2. 读原版结果
         int curHeat = -1;
@@ -34,8 +33,7 @@ public sealed partial class RealPrinterMod
         if (curHeat >= ourHeat)
         {
             if (Config.VerboseLog)
-                RLog.Detail("★ 赃物标记: 价值=" + val + " 原版热度=" + curHeat
-                            + " 我方算=" + ourHeat + " → 保留原版（原版执行=" + vanillaOk + "）");
+                RLog.Detail("  标记：STOLEN_TAG, STOLEN_VALUE_INT=" + curHeat + "（保留原版）");
             return true;
         }
 
@@ -56,9 +54,8 @@ public sealed partial class RealPrinterMod
             try { after = target.state?.GetTag("STOLEN_VALUE_INT")?.GetInt() ?? -1; } catch { }
 
             if (Config.VerboseLog)
-                RLog.Detail("★ 赃物标记: 价值=" + val + " 原版热度=" + curHeat
-                            + " 我方算=" + ourHeat + " → 覆盖，回读=" + after
-                            + (after == ourHeat ? " ✓" : " ✘ 覆盖失败"));
+                RLog.Detail("  标记：STOLEN_TAG, STOLEN_VALUE_INT=" + after
+                            + (after == ourHeat ? "" : "（★覆盖失败）"));
             return after == ourHeat;
         }
         catch (Exception e)

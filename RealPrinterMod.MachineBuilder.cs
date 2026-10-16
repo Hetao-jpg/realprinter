@@ -675,11 +675,7 @@ public sealed partial class RealPrinterMod
         //   ContainerTag  = 目标自己是不是容器（现在的让路判据）
         //   在柜台/在主仓库 = 目标是不是已经躺在某个库存里（V2-4 要判的东西）
         if (Config.VerboseLog)
-            RLog.Detail("拖动落点: id=" + SafeId(target)
-                        + " 拖动来源=" + fromDrag
-                        + " 目标带ContainerTag=" + IsContainerLike(target)
-                        + " 在柜台=" + IsOnFrontCounter(target)
-                        + " 在主仓库=" + IsInWarehouse(target));
+            RLog.Detail("落点: id=" + SafeId(target) + " 拖动=" + fromDrag);
     }
 
     /// <summary>

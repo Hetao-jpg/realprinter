@@ -130,12 +130,7 @@ public sealed partial class RealPrinterMod
                     target.ExecuteOnActivateAction(item);
                     actionMsg = "　已执行档位动作";
                     if (Config.VerboseLog)
-                        RLog.Detail("▶ 已执行档位动作: " + newId
-                            + "（onActivateActionId=" + SafeStr(() => target.onActivateActionId) + "）");
-                }
-                else
-                {
-                    RLog.Detail("· 该档位无onActivateAction（纯标签档位）: " + newId);
+                        RLog.Detail("  已执行档位动作：" + SafeStr(() => target.onActivateActionId));
                 }
             }
             else
@@ -172,11 +167,6 @@ public sealed partial class RealPrinterMod
                 long uv = 0; long nv = 0;
                 try { uv = item.unitValue; } catch (Exception ex) { RLog.Swallowed("WriteFeature", ex); }
                 try { nv = item.GetNegociatedValue(); } catch (Exception ex) { RLog.Swallowed("WriteFeature", ex); }
-                if (Config.VerboseLog)
-                    RLog.Detail("商品侧回读: " + SafeId(item)
-                        + "　基础 unitValue=" + uv
-                        + "　最终 GetNegociatedValue=" + nv
-                        + "　（最终价才是玩家看到的价值；基础值一般不随档位变）");
                 actionMsg += "｜最终价=" + nv;
             }
             catch (Exception e)
@@ -218,13 +208,9 @@ public sealed partial class RealPrinterMod
             bool dispOk = string.Equals(backDisplay, wantDisplay, StringComparison.Ordinal);
 
             if (Config.VerboseLog)
-                RLog.Detail("真值写入回读: " + f.identifier
-                    + " id=" + backReal
-                    + " display=" + (backDisplay ?? "<空>")
-                    + " modValue=" + backMod + "(官方 " + target.modValue + ")"
-                    + " compareValue=" + backCmp + "(官方 " + target.compareValue + ")"
-                    + "　" + (priceOk ? "价格✓" : "★★价格不符")
-                    + (dispOk ? " 显示✓" : " ★显示与官方不一致"));
+                RLog.Detail("  真值：" + "真值=" + backReal + "  假值=" + backFake
+                    + (priceOk ? "  ✓" : "  ★加价不符")
+                    + (dispOk ? "" : "  ★显示不符"));
 
             message = "真值 " + oldReal + " → " + backReal
                       + (string.Equals(backFake, newId, StringComparison.OrdinalIgnoreCase)

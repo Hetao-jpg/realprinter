@@ -50,7 +50,7 @@ public sealed partial class RealPrinterMod
     /// <summary>cfg 句柄（面板规则见 §Config 说明）。</summary>
     public sealed class Cfg
     {
-        public MelonPreferences_Entry<int> FeatureCostEntry;
+        public MelonPreferences_Entry<int> CostPercentEntry;
         public MelonPreferences_Entry<bool> VerboseLogEntry;
         public MelonPreferences_Entry<bool> SupplierStockEntry;
         // ★ V1.4.12：恢复 F6 直领 cfg 开关
@@ -80,12 +80,9 @@ public sealed partial class RealPrinterMod
         /// 0x8358EF：`mov qword ptr [rdi+0x200], 0x32` → 50）。别乱改。</summary>
         public const int BaseMachineValue = 50;
 
-        /// <summary>★ 改一次真值收多少信用点。核桃 2026-10-03 拍板：**固定 20**。
-        /// 【为什么不分档】BlackPrinter 的按等级/分档定价是为 92 条 tag 准备的，
-        ///   RealPrinter 只剩"改真值"一个动作 —— 分档定价失去意义，只会让人算不清。
-        /// 【为什么不免费】红机免费会让黑印毫无存在感；20 相当于跑一趟的零头，
-        ///   够形成"这台机器是稀缺工具"的感觉，又不会挡住正常使用。</summary>
-        public static int FeatureCost = 20;
+        // 改真值收费 = floor((改后价值 - 改前价值) × CostPercent / 100)
+        // 0 = 免费；20 = 20%；差值 ≤ 0 时收 0
+        public static int CostPercent = 20;
 
         /// <summary>
         /// ★★ V1.4.0：供货商上货（**新方向，接替已停用的同行带货**）。
@@ -175,31 +172,32 @@ public sealed partial class RealPrinterMod
         //     全部保留，功能不变；只是值改由代码里的硬编码默认值决定。
         //   ★ Cfg 类里对应的 Entry 字段也保留（不删）—— 万一将来要恢复 cfg 输出，
         //     只需把对应的 CreateEntry 一行加回来，不用改类型定义。
-        _cfg.FeatureCostEntry = cat.CreateEntry("FeatureCost",
-            Config.FeatureCost, "改一次真值（验真/纯度）消耗多少信用点。");
+        _cfg.CostPercentEntry = cat.CreateEntry("CostPercent",
+            Config.CostPercent,
+            "修改费 = 价值增幅 × %。0=免费");
         _cfg.VerboseLogEntry = cat.CreateEntry("VerboseLog",
-            Config.VerboseLog, "详细日志。默认关；排障时勾上它看流水。");
+            Config.VerboseLog, "详细日志（排障用）");
         _cfg.SupplierStockEntry = cat.CreateEntry("SupplierStock",
-            Config.SupplierStock, "供货商每次摆库存时，追加一台真实打印机（可购买）。");
+            Config.SupplierStock, "供货商补货时追加一台");
         // ★ V1.4.12：F6 直领开关（默认关）。打开后按 F6 领取价值 0 的机器。
         _cfg.EnableF6GiveEntry = cat.CreateEntry("EnableF6Give",
             Config.EnableF6Give,
-            "F6 直领：打开后按 F6 领取一台价值 0 的真实打印机（防刷钱）。关闭时不响应。");
+            "F6 领取价值 0 的机器");
         // ★ V1.5.0：拖动触发开关（默认开）。
         _cfg.DragToUseEntry = cat.CreateEntry("DragToUse",
             Config.DragToUse,
-            "拖动触发：打开后，把真实打印机拖到商品上即可开窗（与原版红机一致）。"
-            + "关闭则退回旧用法：先使用/装备，再左键点商品。");
+            "拖动触发改值窗");
         // ★ 改真值后打赃物标记开关（默认开）。
         _cfg.MarkStolenOnEditEntry = cat.CreateEntry("MarkStolenOnEdit",
             Config.MarkStolenOnEdit,
-            "改真值后打赃物标记。开=目标被原版系统当赃物处理；关=只改真值。");
+            "改真值后打赃物标记");
         _cfg.MinStolenHeatEntry = cat.CreateEntry("MinStolenHeat",
             Config.MinStolenHeat,
-            "改真值后按改后价值重算热度；为 0 时的兜底下限（0=不打，25=原版最低档，100=必满）。");
+            "热度下限。0=不打");
 
         // ───── 全部注册完毕，统一读取 ─────
-        Config.FeatureCost = _cfg.FeatureCostEntry.Value;
+        int costPctRaw = _cfg.CostPercentEntry != null ? _cfg.CostPercentEntry.Value : Config.CostPercent;
+        Config.CostPercent = Math.Max(0, Math.Min(1000, costPctRaw));
         Config.VerboseLog = _cfg.VerboseLogEntry.Value;
         Config.SupplierStock = ReadFlag(_cfg.SupplierStockEntry, Config.SupplierStock);
         // ★ V1.4.12：读 F6 开关
@@ -220,8 +218,8 @@ public sealed partial class RealPrinterMod
         //   【安全性】回调在 Unity 主线程触发，与游戏逻辑同线程，不存在竞态。
         try
         {
-            _cfg.FeatureCostEntry.OnEntryValueChanged.Subscribe(
-                (oldV, newV) => { Config.FeatureCost = newV; });
+            _cfg.CostPercentEntry.OnEntryValueChanged.Subscribe(
+                (oldV, newV) => { Config.CostPercent = Math.Max(0, Math.Min(1000, newV)); });
             _cfg.VerboseLogEntry.OnEntryValueChanged.Subscribe(
                 (oldV, newV) => { Config.VerboseLog = newV; });
             _cfg.SupplierStockEntry.OnEntryValueChanged.Subscribe(
@@ -472,7 +470,7 @@ public sealed partial class RealPrinterMod
         public static bool TryCharge(int amount, out string failReason)
         {
             failReason = null;
-            if (amount <= 0) return true;   // 免费（合法配置，不报错）
+            if (amount <= 0) return true;   // 免费
 
             try
             {
@@ -480,17 +478,14 @@ public sealed partial class RealPrinterMod
                 if (store == null) { failReason = "PlayerStore 不可用（不在存档内？）"; return false; }
 
                 int have = store.GetCash();
-                if (have < amount)
-                {
-                    failReason = "信用点不足：需要 " + amount + "，只有 " + have;
-                    return false;
-                }
+                // ★ 不检查余额：游戏允许信用点为负（核桃 2026-10-16 拍板）
+                //   扣成负数由游戏自己处理，我们只做回读确认
 
                 store.ModCash(-amount, false);
                 int after = store.GetCash();
                 if (after != have - amount)
                 {
-                    // ★ 扣费没按预期生效：立刻补回去并报错，不能让玩家白花钱
+                    // 扣费没按预期生效：立刻补回去并报错
                     try { store.ModCash(amount, false); } catch (Exception ex) { RLog.Swallowed("TryCharge", ex); }
                     failReason = "扣费未生效（期望 " + (have - amount) + "，实际 " + after + "），已退回";
                     RLog.Error("⚠ 扣费异常已回滚：" + failReason);
@@ -771,8 +766,7 @@ public sealed partial class RealPrinterMod
             if (_catRealNames.Count == _catListAccessors.Count)
             {
                 _catResolved = true;
-                foreach (var kv in _catRealNames)
-                    RLog.Detail("许可类别 " + kv.Key + " → 游戏真实 category = " + kv.Value);
+                RLog.Detail("许可类别映射：" + string.Join(" / ", new List<string>(_catRealNames.Keys).ToArray()));
                 return true;
             }
 

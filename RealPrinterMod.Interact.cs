@@ -126,7 +126,6 @@ public sealed partial class RealPrinterMod
             if (!TryClaim(__instance, targetItem)) return true;
 
             __result = true;
-            HotLog.Log("MayTarget", __instance, targetItem);
             return false;   // ★★★ 必须短路，否则 __result 被原版覆盖
         }
     }
@@ -140,7 +139,6 @@ public sealed partial class RealPrinterMod
             if (!TryClaim(__instance, targetItem)) return true;
 
             __result = true;
-            HotLog.Log("CanTarget", __instance, targetItem);
             return false;   // ★★★ 必须短路
         }
     }
@@ -172,79 +170,9 @@ public sealed partial class RealPrinterMod
             //   （ReadFieldPtr + il2cpp_string_length + il2cpp_string_chars + Marshal.Copy），
             //   而这些是**实参** —— `RLog.Detail` 内部那句开关拦不住它们，
             //   VerboseLog 关着也照跑。判据写在调用点，实参就只在该分支里求值。
-            if (Config.VerboseLog)
-                RLog.Detail("交互被触发：self="
-                              + SafeId(__instance) + " → target=" + SafeId(targetItem));
             OnTargetItemFunc(targetItem);
             return false;   // ★★★ 不短路会让原版委托链重复触发
         }
-    }
-
-    /// <summary>
-    /// ★★ V0.4.8 热路径日志限流器。
-    ///   热路径日志**永远限流**（MayTarget/CanTarget 每秒几千次 → 全打就是日志炸弹）；
-    ///   详细日志由 Config.VerboseLog 控制，**不在热路径放开**。
-    ///
-    /// ★★ V1.4.11 优化：**VerboseLog 关闭时整条路径直接退出，连锁都不进**。
-    ///   【为什么这是真的优化，而不是微调】
-    ///     这函数挂在 MayTarget/CanTarget 的**接管分支**上 —— 实机日志显示
-    ///     每秒被调 900+ 次（游戏对每个物品每帧都问一遍"能不能作用"）。
-    ///     原来的写法是：进函数 → lock(_slots) → 字典 TryGetValue → 算时间差
-    ///     → 1 秒没到就 return。
-    ///     也就是说 **99% 的调用白拿了一次锁 + 一次字典哈希**，
-    ///     只为了发现"哦，不该打"。
-    ///   → 现在第一行就 `if (!Config.VerboseLog) return;`
-    ///     关着详细日志时，热路径上的日志开销**降为一次静态 bool 读**。
-    ///   ★ 保持"每秒最多一行"的语义不变 —— 打开 VerboseLog 仍是限流。
-    /// </summary>
-    private static class HotLog
-    {
-        /// <summary>一个 kind 一个槽、一把锁（两把锁会让两次加锁之间的状态不一致，
-        /// 且读代码的人得自己拼出"这两个字典是一起的"）。</summary>
-        private sealed class Slot
-        {
-            public double LastAt;
-            public int Skipped;
-        }
-
-        private static readonly Dictionary<string, Slot> _slots =
-            new Dictionary<string, Slot>();
-
-        internal static void Log(string kind, GameItem self, GameItem target)
-        {
-            // ★★★ 关门判断放在最前面：这是本函数唯一无争议的优化点。
-            //   VerboseLog 关着 → 热路径每秒几千次调用全部在此返回，
-            //   不进锁、不查字典、不拼字符串。行为与之前完全一致（Detail 本来就不打）。
-            if (!Config.VerboseLog) return;
-
-            try
-            {
-                lock (_slots)
-                {
-                    double now = (DateTime.UtcNow - _epoch).TotalSeconds;
-                    Slot s;
-                    if (!_slots.TryGetValue(kind, out s))
-                    {
-                        s = new Slot { LastAt = -999 };
-                        _slots[kind] = s;
-                    }
-                    if (now - s.LastAt < 1.0)
-                    {
-                        s.Skipped++;
-                        return;
-                    }
-                    int skipped = s.Skipped;
-                    s.Skipped = 0;
-                    s.LastAt = now;
-                    RLog.Detail(kind + " 接管：self="
-                                  + SafeId(self) + " → target=" + SafeId(target)
-                                  + (skipped > 0 ? "　（另有 " + skipped + " 次同类调用已省略）" : ""));
-                }
-            }
-            catch (Exception ex) { RLog.Swallowed("Log", ex); }
-        }
-
-        private static readonly DateTime _epoch = DateTime.UtcNow;
     }
 
     // ────────────────────────────────────────────────────────────────

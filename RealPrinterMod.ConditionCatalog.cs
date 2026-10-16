@@ -413,10 +413,6 @@ public sealed partial class RealPrinterMod
                 RLog.Warning("★ 官方档位 " + newId + " 的 display 为空 → 弃用");
                 return null;
             }
-            if (Config.VerboseLog)
-                RLog.Detail("官方档位 " + newId + " → display=" + disp
-                    + " modValue=" + c.modValue + " modValueDisplay=" + c.modValueDisplay
-                    + " compareValue=" + c.compareValue);
             return c;
         }
         catch (Exception e)

@@ -271,14 +271,18 @@ public sealed partial class RealPrinterMod
             //   量不大，但它属于"零收益的分配"，且判据搬上来更符合纪律。
             if (Config.VerboseLog)
             {
-                RLog.Detail("编辑窗：" + SafeId(target)
-                    + "　原始 feature " + rawFeatureCount + " 条（可改真值 "
-                    + licensed.Count + " 条，其余类别不在许可范围）"
-                    + "　信用点 " + sess.Cash);
-                foreach (var fr in licensed)
-                    RLog.Detail("  ★许可真值项: " + fr.Id + "　cat=" + fr.Category
-                        + "　现值 REAL=" + fr.RealId + "　假值 FAKE=" + fr.FakeId
-                        + "　游戏判可改=" + fr.CanEdit);
+                var parts = new List<string>();
+                for (int i = 0; i < licensed.Count; i++)
+                {
+                    var fr = licensed[i];
+                    string catZh = License.CategoryLabel(fr.Category);
+                    string tierZh = OfficialDisplay(fr.RealId);
+                    if (string.IsNullOrEmpty(tierZh) || string.Equals(tierZh, fr.RealId, StringComparison.Ordinal))
+                        tierZh = fr.RealId;
+                    parts.Add(catZh + "=" + tierZh);
+                }
+                RLog.Detail("开窗：" + string.Join(" / ", parts.ToArray())
+                    + "　余额 " + sess.Cash);
             }
 
             //★ 文案精简（核桃 V1.0.1：名字太长、字体太大、后缀数字和括号删掉）：
@@ -298,7 +302,7 @@ public sealed partial class RealPrinterMod
             b.End();
 
             //★ 文案按核桃要求改（V1.0.5）：只留费用信息。
-            b.AddLabel("★ 每次修改消耗信用点 " + Config.FeatureCost, null);
+            b.AddLabel("★ 修改费用 = 价值增幅 × " + Config.CostPercent + "%", null);
             ShrinkFont(b);
             b.AddButton("关闭", (Action)(() => CloseEditor()));
             ShrinkFont(b);
@@ -556,98 +560,89 @@ public sealed partial class RealPrinterMod
     ///   "必须成功"的写入不能静默兜底；反过来也一样，不能悄悄吞掉扣费失败）。
     /// </summary>
     private static void ApplyFeatureChange(FeatureRow fr, EditSession sess, string input)
+{
+    if (sess == null)
     {
-        if (sess == null)
-        {
-            Inform("会话已过期，请重新点物品", "yellow");
-            return;
-        }
-
-        // ★★ V1.4.15：目标档位与当前真值相同 → 早退，不写入不扣费。
-        //   【为什么在这里而非 WriteFeature】
-        //     WriteFeature 的调用方只看"成功/失败"，看不到"本次无改动"这个语义；
-        //     在这里早退最直接 —— 既不进 IL2CPP，也不会让玩家为
-        //     "点了一下没变化"付费。
-        //   【为什么要拦】选"已经是这个档位"的候选时，旧版会：
-        //     ① 建新 ItemCondition 对象
-        //     ② 调 SetConditions（把同样的值写一遍）
-        //     ③ 调 ExecuteOnActivateAction（**可能重复执行游戏动作，有副作用**）
-        //     ④ 扣一次费
-        //     —— 玩家会看到"没变化却扣了钱"，是最容易招致差评的体验。
-        if (fr != null && !string.IsNullOrEmpty(fr.RealId)
-            && string.Equals(fr.RealId, input, StringComparison.OrdinalIgnoreCase))
-        {
-            string zhSame = OfficialDisplay(input);
-            if (string.IsNullOrEmpty(zhSame) || string.Equals(zhSame, input, StringComparison.Ordinal))
-                zhSame = input;
-            Inform("已经是「" + zhSame + "」了，无需修改", "yellow");
-            RLog.Detail("真值改写跳过（无改动）：" + fr.Id + " 已是 " + input);
-            return;
-        }
-
-        int cost = Config.FeatureCost;
-        if (sess.Cash < cost)
-        {
-            Inform("信用点不足：改一次真值要 " + cost + "，你只有 " + sess.Cash, "yellow");
-            RLog.Detail("真值改写被拒（余额不足）: " + fr.Id);
-            return;
-        }
-
-        // ★ V1.2.0：**写入前**先读一次商品价值 —— 改完要跟改后值对比着给玩家看。
-        //   【为什么】"改成功了"和"售价真的变了"是两件事（V1.0.4 就栽在这：
-        //     标签全对、回读断言全绿，但商品价格纹丝不动）。
-        //     → 把 before → after 直接打在提示里，一眼就能看出有没有真的变。
-        long valBefore = ReadUnitValue(sess.Target);
-
-        RLog.Detail("▶ 改真值: " + fr.Id + "　" + fr.RealId + " → " + input
-            + "　费用 " + cost + "　改前 unitValue=" + valBefore);
-        // ★ 传target：WriteFeature 要用它调 ExecuteOnActivateAction
-        //   （只贴标签不执行动作 = 游戏里的实际状态不变，售价不会跟着变）。
-        bool ok = WriteFeature(fr.Feature, input, out string msg, sess.Target);
-        if (!ok)
-        {
-            Inform("★ 没能改成：" + msg, "yellow");
-            RLog.Detail("★ 改真值失败: " + fr.Id + " → " + msg);
-            return;
-        }
-
-        // ★ 赃物标记：真值已改成功（回读已通过），扣费之前打
-        if (Config.MarkStolenOnEdit)
-        {
-            try { MarkItemStolen(sess.Target); }
-            catch (Exception e) { RLog.Warning("打赃物标记异常: " + e.Message); }
-        }
-
-        if (!Pay.TryCharge(cost, out string why))
-        {
-            Inform("扣费失败（" + why + "）。改动已生效但没扣到钱 —— 请报我。", "yellow");
-            RLog.Error("★★ 真值写入成功但扣费失败: " + fr.Id + "　" + why);
-        }
-        else
-        {
-            sess.Cash = Pay.Query();
-        }
-
-        // ★★ V1.0.5 提示文案精简（核桃要求）：只要「真品/赝品」+「商品价值」。
-        //   之前把整个 msg（真值链、显示、加价、动作、单位价值）塞进提示，
-        //   一行字糊满屏幕顶部，玩家根本读不到重点。
-        //   档位名取**官方中文**（正品/赝品），取不到才退回内部 id。
-        string tierZh = OfficialDisplay(input);
-        if (string.IsNullOrEmpty(tierZh) || string.Equals(tierZh, input, StringComparison.Ordinal))
-            tierZh = input;
-        long val = ReadUnitValue(sess.Target);
-
-        // ★ V1.2.0：提示改成「改前 → 改后」。
-        //   ★★ 两个值一样时**明确标出来**（"★没变"）—— 这正是售价验证
-        //      最需要的一行：以前只显示改后的数，玩家（和我）根本看不出
-        //      "改了，但价格没动"和"改了，价格也动了"的区别。
-        string arrow = valBefore + " → " + val;
-        if (valBefore == val) arrow += "　★没变";
-        Inform("★ " + tierZh + "　价值 " + arrow, "green");
-        RLog.Detail("✓ 真值已改: " + fr.Id + "　" + msg
-            + "　（扣费 " + cost + "，余额 " + sess.Cash + "）");
-        PlayRatchet();
+        Inform("会话已过期，请重新点物品", "yellow");
+        return;
     }
+
+    // ─── 早退：目标档位与当前相同 ───
+    if (fr != null && !string.IsNullOrEmpty(fr.RealId)
+        && string.Equals(fr.RealId, input, StringComparison.OrdinalIgnoreCase))
+    {
+        string zhSame = OfficialDisplay(input);
+        if (string.IsNullOrEmpty(zhSame) || string.Equals(zhSame, input, StringComparison.Ordinal))
+            zhSame = input;
+        Inform("已经是「" + zhSame + "」了，无需修改", "yellow");
+        RLog.Detail("真值改写跳过（无改动）：" + fr.Id + " 已是 " + input);
+        return;
+    }
+
+    // ★ 2026-10-16：删掉余额硬拦 —— 游戏允许信用点为负，且新收费模式要写入后才能算出成本
+
+    // 写入前读 valBefore
+    long valBefore = ReadUnitValue(sess.Target);
+
+        string tierBefore = OfficialDisplay(fr.RealId);
+        if (string.IsNullOrEmpty(tierBefore)) tierBefore = fr.RealId;
+        string tierAfter = OfficialDisplay(input);
+        if (string.IsNullOrEmpty(tierAfter)) tierAfter = input;
+
+        RLog.Detail("▶ 改真值：" + License.CategoryLabel(fr.Category)
+            + "　" + tierBefore + " → " + tierAfter);
+
+        // ─── 写入 ───
+        bool ok = WriteFeature(fr.Feature, input, out string msg, sess.Target);
+    if (!ok)
+    {
+        Inform("★ 没能改成：" + msg, "yellow");
+        RLog.Detail("★ 改真值失败: " + fr.Id + " → " + msg);
+        return;
+    }
+
+    // ─── 赃物标记 ───
+    if (Config.MarkStolenOnEdit)
+    {
+        try { MarkItemStolen(sess.Target); }
+        catch (Exception e) { RLog.Warning("打赃物标记异常: " + e.Message); }
+    }
+
+    // ─── 读 valAfter → 算成本 ───
+    long valAfter = ReadUnitValue(sess.Target);
+    long delta = valAfter - valBefore;
+    if (delta < 0) delta = 0;   // 差值 ≤ 0 → 收 0
+    long costLong = delta * Config.CostPercent / 100;
+    if (costLong > int.MaxValue) costLong = int.MaxValue;
+    if (costLong < 0) costLong = 0;
+    int cost = (int)costLong;
+
+
+    // ─── 扣费 ───
+    if (!Pay.TryCharge(cost, out string why))
+    {
+        Inform("扣费失败（" + why + "）。改动已生效但没扣到钱 —— 请报我。", "yellow");
+        RLog.Error("★★ 真值写入成功但扣费失败: " + fr.Id + "　" + why);
+    }
+    else
+    {
+        sess.Cash = Pay.Query();
+    }
+
+    // ─── 提示 ───
+    string tierZh = OfficialDisplay(input);
+    if (string.IsNullOrEmpty(tierZh) || string.Equals(tierZh, input, StringComparison.Ordinal))
+        tierZh = input;
+
+    string arrow = valBefore + " → " + valAfter;
+    if (valBefore == valAfter) arrow += "　★没变";
+    string costStr = cost > 0 ? "　花费 " + cost : "　免费";
+    Inform("★ " + tierZh + "　价值 " + arrow + costStr, "green");
+
+    RLog.Detail("  价值：" + valBefore + " → " + valAfter
+    + "　花费 " + cost + "　余额 " + sess.Cash);
+    PlayRatchet();
+}
 
     /// <summary>
     /// 读商品的**最终议价**（玩家在 tooltip / 商店里看到的"预估价值"）。
