@@ -339,7 +339,7 @@ public sealed partial class RealPrinterMod
     public const string ToolAtlasPath = "Items/items_tool";
 
     /// <summary>本 mod 版本号（横幅与排障日志都要打，核桃靠它确认跑的是哪一版）。</summary>
-    public const string SuiteVersion = "1.5.0";
+    public const string SuiteVersion = "1.5.1";
 
     // ═══════════════════════════════════════════════════════════
     // 日志：所有输出走这里，方便排障时统一关掉。
@@ -804,7 +804,11 @@ public sealed partial class RealPrinterMod
         // ═══════════════════════════════════════════════════════════
         private static HashSet<string> _allowed;
 
-        /// <summary>许可集合（官方档位目录的类别键）。目录没建好时返回 null 且不缓存，允许下次重试。</summary>
+        // ★ V2：水主动排除（核桃拍板）—— 改水的价格容易破坏游戏经济平衡。
+        //   保持"许可 = 官方档位目录的键"，只在末尾扣掉这个排除集。
+        private static readonly string[] _excludedSemanticLabels = { "水" };
+
+        /// <summary>许可集合（官方档位目录的类别键，扣掉排除集）。目录没建好时返回 null 且不缓存，允许下次重试。</summary>
         private static HashSet<string> AllowedSet()
         {
             var s = _allowed;
@@ -813,7 +817,18 @@ public sealed partial class RealPrinterMod
             EnsureCatalog();
             if (_byCat == null || _byCat.Count == 0) return null;
 
+            if (!ResolveCategoryNames()) return null;
+
             s = new HashSet<string>(_byCat.Keys, StringComparer.OrdinalIgnoreCase);
+            foreach (var label in _excludedSemanticLabels)
+            {
+                string cat;
+                if (_catRealNames.TryGetValue(label, out cat) && !string.IsNullOrEmpty(cat))
+                    s.Remove(cat);
+                if (_catFallback.TryGetValue(label, out cat) && !string.IsNullOrEmpty(cat))
+                    s.Remove(cat);
+            }
+
             _allowed = s;
             return s;
         }

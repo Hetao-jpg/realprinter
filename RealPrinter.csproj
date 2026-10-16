@@ -11,7 +11,7 @@
     <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
     <DebugType>none</DebugType>
     <PlatformTarget>x64</PlatformTarget>
-	  <Version>1.5.0</Version>
+	  <Version>1.5.1</Version>
   </PropertyGroup>
   <PropertyGroup Condition="'$(GamePath)' == ''">
     <GamePath>D:/SteamLibrary/steamapps/common/Probably Stolen Demo</GamePath>
