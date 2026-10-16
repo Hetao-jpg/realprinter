@@ -64,17 +64,31 @@ public sealed partial class RealPrinterMod : MelonMod
         //★★★ 面向用户版唯一的"开关"，错了整台机器就白给，必须机器查。
         //   每个许可 category 必须**在官方目录里真的有档位**，
         //   否则玩家点开只会看到"没有可选档位"。
+        // ★★ V2：返回值分两级 —— functional → Error；cosmetic（显示降级）→ Warning。
+        //   旧版把"类别中文名没读全"也打成 Error，玩家**每次启动看到红字**，
+        //   以为 mod 坏了（其实功能一点不受影响）。误报比不报更坏。
         try
         {
-            var licBad = License.SelfCheckLicense();
-            if (licBad.Count > 0)
-                RLog.Error("★★ 许可类别自检发现 " + licBad.Count + " 处问题"
-                           + "（这些类别可能开不了窗）：\n"
-                           + string.Join("\n", licBad.ConvertAll(x => "    · " + x)));
-            else
+            License.SelfCheckLicense(out var funcBad, out var cosBad);
+            if (funcBad.Count > 0)
+                RLog.Error("★★ 许可类别自检发现 " + funcBad.Count + " 处功能问题"
+                           + "（这些类别开不了窗）：\n"
+                           + string.Join("\n", funcBad.ConvertAll(x => "    · " + x)));
+            if (cosBad.Count > 0)
+                RLog.Warning("⚠ 许可显示降级（不影响功能）：\n"
+                           + string.Join("\n", cosBad.ConvertAll(x => "    · " + x)));
+            if (funcBad.Count == 0 && cosBad.Count == 0)
                 RLog.Detail("许可类别自检通过（" + License.AllAllowed().Length + " 类均有官方档位）。");
         }
         catch (Exception e) { RLog.Error("★★ 许可类别自检异常: " + e.Message); }
+
+        // —— 拖动采样机制（V2-7）——
+        // ★ "这套机制到底有没有在跑"必须可查：拖动采样一旦静默失效，
+        //   拖动让路与延迟开窗会**一起**失效，而且一行日志都没有（最难查的那类故障）。
+        // ★★ 实机教训（2026-10-16）：原来这里在启动时打一行 Detail —— 结果是
+        //   "启动时 VerboseLog 还关着"就整行消失（核桃是进游戏后才在面板里打开的）。
+        //   → 那行**搬进 SampleDragState**：第一次成功采到拖动状态、且日志真的开着时打。
+        //     晚一点报，总比永远不报强。
 
         // —— 硬编码偏移量自检（代码评审 P0-2）——
         // ★ 这是全项目**唯一一处"游戏升级就会断"的地方**：
@@ -249,11 +263,6 @@ public sealed partial class RealPrinterMod : MelonMod
         catch (Exception e) { RLog.Warning("读档修复异常: " + e.Message); }
     }
 
-    /// <summary>
-    /// ★ V1.4.12：恢复 F6 直领热键轮询。
-    ///   关着 cfg 时——**首行 return，零开销**（只读一次静态 bool）。
-    ///   关闭时按 F6 无反应且不弹提示（核桃 2026-10-05 拍板）。
-    /// </summary>
     /// <summary>
     /// ★★ V1.4.12：恢复 F6 直领热键轮询。
     ///   关着 cfg 时 —— **首行 return，零开销**（只读一次静态 bool）。

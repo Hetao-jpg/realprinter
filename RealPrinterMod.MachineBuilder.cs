@@ -96,18 +96,16 @@ public sealed partial class RealPrinterMod
     /// 造一台真实打印机。
     /// ★★ 完全照抄 ToolDirectory.CreateLabeler 的流程（反汇编取证，见文件头）。
     ///   关键点：① 用目录成品物品，不是 CreateEmptyItem
-    ///         ② sprite 用游戏自己的 atlas（临时借一个原版图，样式后续换）
+    ///         ② sprite 用游戏自己的图集（原版就是借用的）
     ///         ③ 挂 LABELER_TAG（不是 "LABELER"）
     ///         ④ 不调 SetGameItemType —— 否则 tooltip 多出"[工具]"行
-    ///         ⑤ 直接给 onThisTargetItemFunc 赋值，走官方交互正门
-    ///  ⑩ ★ V1.3.0：`valueOverride` > 0 时用它当机器价值（供货商上货卖 100，
-    ///     F6 直领沿用原版红机的固定 50）。不传（0）就用固定 50。
-    /// </summary>
-    /// <summary>
-    /// ★ V1.4.12：`valueOverride` 语义改清楚：
+    ///         ⑤ 交互走 Harmony 打 GameItem.MayTarget / CanTarget / Target
+    ///            （"给物品挂托管委托"那条路已证伪，见 Interact.cs 文件头）
+    ///
+    /// ★ V1.4.12：`valueOverride` 语义：
     ///   · `< 0`（默认）→ 用 `Config.BaseMachineValue`（原版红机口径 50）
     ///   · `>= 0`      → 显式使用传入值（0 = F6 直领防刷钱版；100 = 供货商售价版）
-    /// 【为什么改】原逻辑 `> 0 ? ... : default` 无法区分"没传"和"传 0"——
+    /// 【为什么不是 `> 0 ? ... : default`】它分不清"没传"和"传 0"——
     ///   而 F6 直领恰恰需要"传 0 就真的是 0"。
     /// </summary>
     private static GameItem CreateRealPrinter(int valueOverride = -1)
@@ -352,20 +350,63 @@ public sealed partial class RealPrinterMod
         // 【为什么只在拖动中生效】非拖动时（装备后左键点）不涉及放置，
         //   加这道闸只会把"点了没反应"变成"弹红字"，是**行为变更**；
         //   限制在拖动中 = 只在真正需要让路的场景让路，影响面最小。
-        //   ★ 而且拖动时 `IsDraggingNow()` 已经被读过一次，多一次 IsTag 的边际成本可控。
-        if (IsDraggingNow() && IsContainerLike(target)) return false;
+        //
+        // ★★ V2：判据改走 `IsContainerLikeCached`（原来是裸 `IsContainerLike`）。
+        //   【为什么必须缓存】这里是热路径（MayTarget/CanTarget 每秒 900+ 次），
+        //     而拖动中游戏**每帧对可见的每个物品都问一遍** —— 同一帧里的目标是
+        //     一整排**不同**物品，不是同一个。所以缓存必须按指针多槽；
+        //     单槽会被下一个物品顶掉，等于没缓存（详见 IsContainerLikeCached）。
+        if (IsDraggingNow() && IsContainerLikeCached(target)) return false;
 
         return true;
     }
 
     /// <summary>
     /// ★ V1.5.0：这是不是个容器（工具箱 / 档案箱 / 背包 / 箱子…）。
-    /// ★ 只在拖动中的非热分支调用；失败返回 false（宁可多接管一次，也不让路给错误目标）。
+    /// ★★ V2：**只剩冷路径在用**（拖动落点日志那一行；每次拖动 1~几次）。
+    ///   热路径（IsTargetEditable）走 <see cref="IsContainerLikeCached"/>。
+    ///   失败返回 false（宁可多接管一次，也不让路给错误目标）。
     /// </summary>
     private static bool IsContainerLike(GameItem target)
     {
         try { return target.IsTag(ContainerTag); }
         catch (Exception ex) { RLog.Swallowed("IsContainerLike", ex); return false; }
+    }
+
+    // ────────────────────────────────────────────────────────────
+    // ★★ V2：拖动中容器判据的**多槽缓存**（按指针）。
+    //
+    // 【为什么不是单槽】上一版想用单槽的理由是"拖动期间落点唯一（_pendingDrop 只有一个）"
+    //   —— 那个前提对 **落点队列**成立，对**这个判据**不成立：
+    //   判据挂在 IsTargetEditable 上，游戏每帧对**可见的每个物品**都问一遍
+    //   （N 个不同指针）。单槽每帧都被下一个物品顶掉 → N 个物品 × 每帧重算
+    //   = **一次都没省**。
+    // 【为什么可以长驻整次拖动】容器 tag 在一次拖动里不会变；
+    //   拖动结束时整体清空（清空点在 SampleDragState 的下降沿）。
+    // 【为什么缓存键用裸指针】不进 IL2CPP，半死对象也安全（同活体闸纪律）；
+    //   指针被复用（极罕见）最坏让"让路判据"错一次，不崩。
+    // ────────────────────────────────────────────────────────────
+    private const int ContainerCacheMax = 512;
+    private static readonly Dictionary<long, bool> _containerCache = new Dictionary<long, bool>();
+
+    private static bool IsContainerLikeCached(GameItem target)
+    {
+        long p;
+        try { p = ((Il2CppObjectBase)target).Pointer.ToInt64(); }
+        catch { return false; }
+        if (p == 0) return false;
+
+        bool v;
+        if (_containerCache.TryGetValue(p, out v)) return v;
+
+        // 上限保护：异常路径（指针狂变）下也不能无界增长
+        if (_containerCache.Count >= ContainerCacheMax) _containerCache.Clear();
+
+        try { v = target.IsTag(ContainerTag); }
+        catch (Exception ex) { RLog.Swallowed("IsContainerLike", ex); v = false; }
+
+        _containerCache[p] = v;
+        return v;
     }
 
     /// <summary>
@@ -398,9 +439,6 @@ public sealed partial class RealPrinterMod
         catch { return false; }
     }
 
-    /// ★ 官方交互入口的落地实现（由 Harmony 的 GameItem.Target补丁调用）。
-    ///   对应原版 LabelerHelper.OnTargetItem → LabelerUIManager.OpenUI(target)。
-    ///
     /// <summary>
     /// ★★ 游戏当前是否**正在拖动物品**。
     ///
@@ -435,17 +473,82 @@ public sealed partial class RealPrinterMod
         return _dragging;
     }
 
-    private static bool _dragging;
+    /// <summary>
+    /// ★★ V2：**实时**读拖动状态 —— 只给 QueueDrop 做落点归类用（落点级频率）。
+    /// 【为什么不复用 IsDraggingNow】那是热路径（IsTargetEditable，每秒数千次）的缓存版；
+    ///   落点这一处要的是"此刻"，多读两次 IL2CPP 属性完全付得起。
+    /// 【关于可靠性】它只能回答"此刻 isDragging 是不是 true"，**回答不了**
+    ///   "EndDrag 有没有跑完" —— 所以它**不承担安全职责**（安全由"一律压后一帧"保证，
+    ///   见 OnTargetItemFunc）。判错的最坏后果只是"关着拖动触发时多开一次窗"，不崩。
+    /// </summary>
+    private static bool IsReallyDraggingNow()
+    {
+        try
+        {
+            var h = ItemMouseDragHandler.current;
+            return h != null && h.IsDraggingItem;
+        }
+        catch (Exception ex) { RLog.Swallowed("IsReallyDraggingNow", ex); return false; }
+    }
 
-    /// <summary>★ 每帧采样一次"是否正在拖动"（由 OnUpdate 调用，顺序必须早于 TickPendingDrop）。</summary>
+    private static bool _dragging;
+    private static bool _draggingPrev;        // 上一帧的拖动状态（只为抓"结束"下降沿）
+    private static bool _dragProbeOkLogged;   // "机制正常"只报一次
+    private static bool _dragProbeWarned;     // "首次异常"只报一次
+
+    /// <summary>
+    /// ★ 每帧采样一次"是否正在拖动"（由 OnUpdate 调用，顺序必须早于 TickPendingDrop）。
+    ///
+    /// ★★ V2 两处新增：
+    ///   ① **下降沿清容器缓存**。
+    ///      【为什么必须在这里】看上去该在 TickPendingDrop 里清，但那条路在
+    ///        `_pendingDrop == null` 时**首行就 return** —— 而"拖动中让路给箱子"
+    ///        这条路恰恰**不会产生落点** → 缓存永远清不掉：两次拖动之间指针被复用
+    ///        就会留下错误结论，而且会无界增长。这里是每帧都跑的，唯一可靠的位置。
+    ///   ② **可见化**：首次读到 handler / 首次异常各报一次。
+    ///      【为什么两个标志要分开】合成一个的话，首次采样一旦抛异常，
+    ///        之后就算恢复正常也永远不会再打"机制正常"。
+    ///      【为什么只报一次】本机制每帧都跑，报多了就是刷屏；
+    ///        它是"静默失效最难查"的那一类（OnUpdate 没挂 / 静态字段改名 /
+    ///        handler 拿不到 → 让路与延迟开窗会**一起**失效且毫无日志）。
+    /// </summary>
     private static void SampleDragState()
     {
         try
         {
             var h = ItemMouseDragHandler.current;
             _dragging = h != null && h.IsDraggingItem;
+
+            // 拖动结束的下降沿 → 清容器缓存（见上）
+            if (_draggingPrev && !_dragging) _containerCache.Clear();
+            _draggingPrev = _dragging;
+
+            // ★ V2-7：首次读到 handler 且**能打印时**报一次（含机制是否启用）。
+            //   【为什么必须带 `Config.VerboseLog` 才是对的】实测踩到：第一版把标志
+            //     无条件置位、只让 RLog.Detail 自己吞掉输出 —— 于是"第一次拖动
+            //     发生在 VerboseLog 还没打开的时候"就把这一次机会用掉了，
+            //     之后永远看不到这行（2026-10-16 实机日志：一次都没出现）。
+            //   → 标志只在**真的打出去**的时候置位，晚一点打总比永远不打强。
+            //   【失败方向不受影响】异常那条走 RLog.Warning，与 VerboseLog 无关。
+            if (!_dragProbeOkLogged && h != null && Config.VerboseLog)
+            {
+                _dragProbeOkLogged = true;
+                RLog.Detail("拖动采样机制正常：ItemMouseDragHandler.current 可读（DragToUse="
+                            + (Config.DragToUse ? "开" : "关") + "）。");
+            }
         }
-        catch (Exception ex) { RLog.Swallowed("SampleDragState", ex); _dragging = false; }
+        catch (Exception ex)
+        {
+            RLog.Swallowed("SampleDragState", ex);
+            _dragging = false;
+
+            if (!_dragProbeWarned)
+            {
+                _dragProbeWarned = true;
+                RLog.Warning("⚠ 拖动采样异常 —— 拖动让路与延迟开窗可能失效。原因："
+                           + ex.GetType().Name + ": " + ex.Message);
+            }
+        }
     }
 
     /// <summary>
@@ -453,6 +556,7 @@ public sealed partial class RealPrinterMod
     ///   对应原版 LabelerHelper.OnTargetItem → LabelerUIManager.OpenUI(target)。
     ///
     /// ★★ V1.5.0：拖动**不再短路**，改成"压后一帧"。
+    /// ★★★ V2：**无条件压后一帧**，且延迟不再受任何 cfg 影响（见方法体内说明）。
     /// </summary>
     internal static void OnTargetItemFunc(GameItem target)
     {
@@ -476,14 +580,29 @@ public sealed partial class RealPrinterMod
         //   状态已稳定）才真正开窗，并在开窗前复核指针没漂。
         //   → 把"读 IL2CPP"从最危险的时刻挪到最安全的时刻。
         //
-        // ★ cfg 关掉（DragToUse=false）就退回 V1.4.x 行为：拖动不触发。
-        if (Config.DragToUse && IsDraggingNow())
-        {
-            QueueDrop(target);
-            return;
-        }
-
-        RunTargetItemFunc(target);
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ V2 修正：**不再在这里判拖动，一律入队**。
+        //
+        // 【原来写的是】`if (Config.DragToUse && IsDraggingNow()) { QueueDrop(target); return; }`
+        //   它有两个问题：
+        //   ① **安全机制被功能开关绑死**：DragToUse 一关（README 恰好教玩家
+        //      "拖机会闪退就把拖动关掉"），延迟整条消失 → 落点直接
+        //      RunTargetItemFunc → OpenEditor → DetectFeatures，
+        //      正好回到上面那段实机事故的窗口里。**关掉功能反而更容易崩**。
+        //      而且同一处旧注释写的"cfg 关掉就退回 V1.4.x 行为：拖动不触发"
+        //      与代码不符（V1.4.x 那行是**无条件**短路）：既触发、又不延迟。
+        //   ② **判据在最需要它的那一瞬间答不准**：`IsDraggingNow()` 读的是**上一帧的采样**，
+        //      而 EndDrag 那一刻 isDragging 已经是 false、本帧采样又未必跑过；
+        //      实时读也只能回答"此刻是不是在拖"，回答不了"EndDrag 跑完没有" ——
+        //      而危险窗口恰恰就是"isDragging 已 false、EndDrag 还没跑完"那一段。
+        //
+        // 【V2 的结构性解法】不判了：**所有 Target 调用一律压后一帧**。
+        //   · 点击路径同样只晚一帧（≈16ms，玩家无感）；
+        //   · 换来的是"开窗永远不会发生在 EndDrag 的调用栈里" ——
+        //     不依赖缓存准不准、不依赖实时读拿到什么、不依赖游戏哪个版本先置 false；
+        //   · DragToUse 退化成**纯功能开关**，由 TickPendingDrop 在安全时机处理。
+        // ═══════════════════════════════════════════════════════════
+        QueueDrop(target);
     }
 
     /// <summary>★ 真正落地开窗（拖动路径与点击路径共用）。</summary>
@@ -510,17 +629,28 @@ public sealed partial class RealPrinterMod
     // 【为什么是"一帧之后"而不是"立刻"】见 OnTargetItemFunc 里的实机事故记录。
     // 【为什么只留最后一个】一次拖动里游戏可能多次调 Target（悬停高亮也会问），
     //   后到的覆盖先到的 —— 真正要开窗的是**松手那一刻**的落点。
+    // ★★ V2：点击路径也走这里（见 OnTargetItemFunc），所以本队列现在
+    //   **同时服务"点击"和"拖动落点"**，两者的差别只剩 `FromDrag` 一个标记。
     // ═══════════════════════════════════════════════════════════
     private sealed class PendingDrop
     {
         public GameItem Target;
         public IntPtr Ptr;
         public float QueuedAt;
+        /// <summary>★ V2：这次落点是不是拖动来的（决定 DragToUse 关着时要不要丢弃）。</summary>
+        public bool FromDrag;
     }
 
     private static PendingDrop _pendingDrop;
 
-    /// <summary>拖动中记下落点。**只做指针级操作，绝不进 IL2CPP 读字段。**</summary>
+    /// <summary>
+    /// 记下落点。**只做指针级操作，绝不进 IL2CPP 读字段。**
+    ///
+    /// ★★ V2：多了一件事 —— 给落点打"是不是拖动来的"标记，并（VerboseLog 下）
+    ///   打一行落点日志。日志**只在这一处**：它同时服务"拖动路径可见化"（V2-7）
+    ///   与"主仓库落点取证"（V2-4 的 PR-B），不另写第二份。
+    ///   频率 = 每次点击/落点 1 行，不在热路径上。
+    /// </summary>
     private static void QueueDrop(GameItem target)
     {
         if (target == null) return;
@@ -528,19 +658,55 @@ public sealed partial class RealPrinterMod
         try { p = ((Il2CppObjectBase)target).Pointer; }
         catch { return; }
         if (p == IntPtr.Zero) return;
-        _pendingDrop = new PendingDrop { Target = target, Ptr = p, QueuedAt = Time.unscaledTime };
+
+        // 尽力而为的归类。判错的**最坏后果**只是"关着拖动触发时多开一次窗"
+        // （不是崩溃 —— 安全由"一律压后一帧"保证，与这个标记无关）。
+        bool fromDrag = IsDraggingNow() || IsReallyDraggingNow();
+
+        _pendingDrop = new PendingDrop
+        {
+            Target = target,
+            Ptr = p,
+            QueuedAt = Time.unscaledTime,
+            FromDrag = fromDrag,
+        };
+
+        // ★ V2-7 / V2-4：落点日志（冷路径）。三个布尔就是"主仓库 tag"那张取证明细：
+        //   ContainerTag  = 目标自己是不是容器（现在的让路判据）
+        //   在柜台/在主仓库 = 目标是不是已经躺在某个库存里（V2-4 要判的东西）
+        if (Config.VerboseLog)
+            RLog.Detail("拖动落点: id=" + SafeId(target)
+                        + " 拖动来源=" + fromDrag
+                        + " 目标带ContainerTag=" + IsContainerLike(target)
+                        + " 在柜台=" + IsOnFrontCounter(target)
+                        + " 在主仓库=" + IsInWarehouse(target));
     }
 
     /// <summary>
     /// 每帧检查落点队列。★ 队列为空时**只是一次静态字段读**（性能铁律：
     /// 常态路径零开销），有落点才去读 `IsDraggingItem` 那个 bool。
+    ///
+    /// ★★ V2：多了一道"拖动触发关着 → 丢弃拖动落点"的闸（见下 ①）。
     /// </summary>
     private static void TickPendingDrop()
     {
         var pd = _pendingDrop;
         if (pd == null) return;
 
-        // 拖动还没真正结束 → 继续等。
+        // ① ★★ V2：拖动触发关着（DragToUse=false）→ 拖动来的落点直接丢弃，
+        //    回到 V1.4.x 的"拖动不触发"。
+        //    【为什么放在这里而不是 OnTargetItemFunc】那里不能判——见该方法的说明：
+        //      入队是无条件的安全动作，**要不要开窗**才是功能开关的事，
+        //      而"要不要开窗"必须等到状态稳定（本方法）才有资格判断。
+        //    【为什么判 DragToUse 而不是 cfg 变更】玩家可能在拖动途中改配置，
+        //      以开窗时刻的配置为准更符合直觉。
+        if (pd.FromDrag && !Config.DragToUse)
+        {
+            _pendingDrop = null;
+            return;
+        }
+
+        // ② 拖动还没真正结束 → 继续等。
         // ★ 超时保护：万一 isDragging 卡住（异常中断拖动），不能在玩家不知情时
         //   憋一个幽灵窗口等下去 —— 2 秒后丢弃。
         if (IsDraggingNow())

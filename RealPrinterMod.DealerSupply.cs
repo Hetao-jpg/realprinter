@@ -46,26 +46,49 @@ public sealed partial class RealPrinterMod
 
     private static bool IsOnFrontCounter(GameItem item)
     {
-        if (item == null) return false;
+        return IsInside(TryGetInventory(front: true), item);
+    }
+
+    /// <summary>
+    /// ★ V2：这件物品是不是躺在**主仓库**（`EmporiumEntry.invElement`）里。
+    ///   用途：拖动落点取证（V2-4）—— 判"目标已经躺在某个库存里"时，
+    ///   游戏的落点优先级究竟是"放进去"还是"对目标使用"。
+    ///   与 IsOnFrontCounter 同构、同用 <see cref="IsInside"/>；只在
+    ///   VerboseLog 的落点日志里调（每次落点 1 次），不进热路径。
+    /// </summary>
+    private static bool IsInWarehouse(GameItem item)
+    {
+        GameInventory warehouse = null;
+        try
+        {
+            var emp = EmporiumEntry.Instance;
+            if (emp != null) warehouse = emp.invElement;
+        }
+        catch (Exception ex) { RLog.Swallowed("IsInWarehouse", ex); }
+        return IsInside(warehouse, item);
+    }
+
+    /// <summary>★ V2：一个裸指针，在不在某个库存的 childItems 里（纯指针比较，不进 IL2CPP 读目标字段）。</summary>
+    private static bool IsInside(GameInventory inv, GameItem item)
+    {
+        if (inv == null || item == null) return false;
         IntPtr pointer;
         try { pointer = ((Il2CppObjectBase)item).Pointer; }
-        catch (Exception e) { RLog.Swallowed("IsOnFrontCounter", e); return false; }
+        catch (Exception e) { RLog.Swallowed("IsInside", e); return false; }
         if (pointer == IntPtr.Zero) return false;
         try
         {
-            GameInventory val = TryGetInventory(front: true);
-            if (val == null) return false;
-            var childItems = val.childItems;
+            var childItems = inv.childItems;
             if (childItems == null) return false;
             for (int i = 0; i < childItems.Count; i++)
             {
-                GameItem val2 = childItems[i];
-                if (val2 == null) continue;
-                try { if (((Il2CppObjectBase)val2).Pointer == pointer) return true; }
-                catch (Exception e2) { RLog.Swallowed("IsOnFrontCounter", e2); }
+                GameItem val = childItems[i];
+                if (val == null) continue;
+                try { if (((Il2CppObjectBase)val).Pointer == pointer) return true; }
+                catch (Exception e2) { RLog.Swallowed("IsInside", e2); }
             }
         }
-        catch (Exception e3) { RLog.Swallowed("IsOnFrontCounter", e3); }
+        catch (Exception e3) { RLog.Swallowed("IsInside", e3); }
         return false;
     }
 }

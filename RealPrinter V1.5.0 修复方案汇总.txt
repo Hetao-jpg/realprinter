@@ -1,0 +1,351 @@
+RealPrinter V1.5.0 修复方案汇总
+修复 1 🔴 拖动起始帧可能误开窗
+问题定位
+文件：RealPrinterMod.MachineBuilder.cs · OnTargetItemFunc()
+
+根因：IsDraggingNow() 读的是 SampleDragState() 上一帧的缓存。当玩家按下鼠标、移动超过拖动阈值、游戏同一帧内调 GameItem.Target 时，缓存里 _dragging 还是 false → 走 RunTargetItemFunc → 立刻开窗。
+
+影响
+拖动刚起步时窗口一闪（本应等拖动结束才开）
+
+概率低（需要拖动阈值一跨过就命中 Target），但确实存在
+
+修复方案
+在 OnTargetItemFunc 里不再只信缓存，加一次实时兜底判据（该方法频率是点击级，实时读得起）：
+
+csharp
+internal static void OnTargetItemFunc(GameItem target)
+{
+    // ★ 拖动判据：缓存 + 实时兜底
+    //   缓存：每秒被调数千次的 IsTargetEditable 走这条（零额外开销）
+    //   实时：OnTargetItemFunc 是点击级频率，多读一次 IL2CPP 值不起
+    if (Config.DragToUse && (IsDraggingNow() || IsReallyDraggingNow()))
+    {
+        QueueDrop(target);
+        return;
+    }
+    RunTargetItemFunc(target);
+}
+
+/// <summary>
+/// ★ V1.5.1：实时读拖动状态 —— 只给 OnTargetItemFunc 用（点击级频率）。
+/// 【为什么不复用 IsDraggingNow】那是给热路径（IsTargetItemEditable，
+///   每秒数千次）准备的缓存版；点击级路径用实时的更准。
+/// </summary>
+private static bool IsReallyDraggingNow()
+{
+    try
+    {
+        var h = ItemMouseDragHandler.current;
+        return h != null && h.IsDraggingItem;
+    }
+    catch (Exception ex) { RLog.Swallowed("IsReallyDraggingNow", ex); return false; }
+}
+验证
+拖动一次商品：窗口应在松手后才出现，不应在拖动起步瞬间闪出
+
+反复快速拖动：连拖 10 次，0 次误开窗
+
+修复 2 ⚠️ 拖动期间 IsContainerLike 性能热点
+问题定位
+文件：RealPrinterMod.MachineBuilder.cs · IsTargetEditable() 末尾
+
+根因：IsTargetEditable 在 MayTarget/CanTarget 热路径上（每秒数千次），拖动中照样被调。每次调都跑一次 target.IsTag(ContainerTag) = 一次 IL2CPP 调用。
+
+量级估算：拖动时柜台/仓库里若有 N 个物品可见，游戏可能每帧对每个物品问一遍 → N × 60 次/秒 × 一次 IL2CPP 调用。
+
+影响
+拖动时帧率可能轻微下降（取决于物品数量）
+
+数量少时察觉不到；数量多时可能掉帧
+
+修复方案
+思路：拖动中的落点判据，同一目标只算一次并缓存。用一个轻量 LRU（或直接单槽缓存，因为拖动中落点是唯一的）。
+
+csharp
+// ────────────────────────────────────────────────────────────
+// ★ V1.5.1：拖动中容器判据的**单槽缓存**。
+//   拖动期间落点是唯一的（_pendingDrop 只有一个），所以单槽足够。
+//   目的：把每秒数千次的 IsTag IL2CPP 调用压到每秒 1~2 次。
+// ────────────────────────────────────────────────────────────
+private static long _containerCacheKey;   // 目标指针（0 = 无缓存）
+private static bool _containerCacheVal;
+
+internal static bool IsTargetEditable(GameItem target)
+{
+    if (target == null) return false;
+    if (!IsSafeTarget(target)) return false;
+    try { if (IsOurMachine(target)) return false; } catch { return false; }
+
+    if (IsDraggingNow() && IsContainerLikeCached(target)) return false;
+    return true;
+}
+
+/// <summary>
+/// ★ V1.5.1：容器判据的缓存版。
+/// 【缓存策略】拖动中落点唯一 → 单槽缓存足够；指针变了就重算。
+/// 【正确性】缓存键是裸指针，能区分不同目标；指针被复用（极罕见）时
+///   最坏也只是让路判据错一次，不崩。
+/// </summary>
+private static bool IsContainerLikeCached(GameItem target)
+{
+    long p;
+    try { p = ((Il2CppObjectBase)target).Pointer.ToInt64(); }
+    catch { return false; }
+    if (p == 0) return false;
+
+    if (p == _containerCacheKey) return _containerCacheVal;
+
+    bool v = false;
+    try { v = target.IsTag(ContainerTag); }
+    catch (Exception ex) { RLog.Swallowed("IsContainerLike", ex); }
+
+    _containerCacheKey = p;
+    _containerCacheVal = v;
+    return v;
+}
+注意：拖动结束后应清缓存（防止指针复用留下错误的 _containerCacheVal）。在 TickPendingDrop 处理完后加：
+
+csharp
+_pendingDrop = null;
+_containerCacheKey = 0;   // ★ 清缓存
+验证
+拖动时帧率无明显下降（用 Unity Profiler 或肉眼看）
+
+拖动进工具箱：仍然能放进去
+
+拖动到商品上：仍然开窗
+
+修复 3 ⚠️ 主仓库是否带 CONTAINER_TAG 未验证
+问题定位
+文件：RealPrinterMod.MachineBuilder.cs · IsContainerLike() 的语义假设
+
+隐患：IsContainerLike 只查 ContainerTag。如果主仓库（EmporiumEntry.invElement）不带这个 tag，则：
+
+玩家把打印机拖到主仓库里的某个已有物品上
+
+IsTargetEditable 返回 true → 开窗
+
+而不是走放置逻辑
+
+修复方案（需要先实机验证，再决定要不要改）
+第一步：加一行临时日志，实机确认主仓库物品是否带 CONTAINER_TAG：
+
+csharp
+// 临时代码（确认后删掉）
+private static bool IsContainerLike(GameItem target)
+{
+    try
+    {
+        bool hasTag = target.IsTag(ContainerTag);
+        // ★ 临时：只在 VerboseLog 时打，确认主仓库物品的 tag 情况
+        if (Config.VerboseLog)
+        {
+            string id = SafeStr(() => target.identifier);
+            RLog.Detail("容器判据: id=" + id + " ContainerTag=" + hasTag);
+        }
+        return hasTag;
+    }
+    catch (Exception ex) { RLog.Swallowed("IsContainerLike", ex); return false; }
+}
+第二步：根据实机结果决定：
+
+情况 A：主仓库物品带 CONTAINER_TAG → 当前代码正确，删掉临时日志即可。
+
+情况 B：主仓库物品不带 CONTAINER_TAG → 需要加判据。追加检查：
+
+csharp
+private static bool IsContainerLike(GameItem target)
+{
+    // ① 通用容器 tag
+    try { if (target.IsTag(ContainerTag)) return true; } catch { }
+
+    // ② ★ 兜底：目标在某个已知库存里（说明它本身就是"被装的物品"，
+    //    拖动到它身上应该是"放进它所在的库存"）
+    //    ★ 只在拖动中调，冷路径，可接受
+    try
+    {
+        var emp = EmporiumEntry.Instance;
+        if (emp != null)
+        {
+            IntPtr tp = ((Il2CppObjectBase)target).Pointer;
+            // 主仓库
+            var wh = emp.invElement;
+            if (wh?.childItems != null && ContainsPtr(wh.childItems, tp)) return true;
+            // 前柜台
+            var front = TryGetInventory(true);
+            if (front?.childItems != null && ContainsPtr(front.childItems, tp)) return true;
+        }
+    }
+    catch (Exception ex) { RLog.Swallowed("IsContainerLike", ex); }
+
+    return false;
+}
+
+private static bool ContainsPtr(Il2CppSystem.Collections.Generic.List<GameItem> list, IntPtr p)
+{
+    for (int i = 0; i < list.Count; i++)
+    {
+        try { if (list[i] != null && ((Il2CppObjectBase)list[i]).Pointer == p) return true; }
+        catch { }
+    }
+    return false;
+}
+这一步：实机确认后再决定。没验证前不要盲改。
+
+修复 4 ⚠️ SelfCheckLicense 把"显示降级"当"功能故障"
+问题定位
+文件：RealPrinterMod.Core.cs · License.SelfCheckLicense()
+
+根因：
+
+csharp
+else if (_catRealNames.Count < _catListAccessors.Count)
+    bad.Add("类别中文名只解析出 ... 条 —— 未命中的那些会显示 CATEGORY_ 英文原名。");
+这条进 bad，被 RealPrinterMod.cs 打成 RLog.Error。但：
+
+某些游戏版本里，部分分类静态表本来就是空的（未发布的类别、DLC 内容）
+
+玩家会看到"每次启动都报错"，误以为 mod 坏了
+
+修复方案
+SelfCheckLicense 的返回值分两级：功能故障（Error） 与 显示降级（Warning）。
+
+csharp
+// 改签名：返回 (功能故障, 显示降级) 两个列表
+internal static void SelfCheckLicense(out List<string> functional, out List<string> cosmetic)
+{
+    functional = new List<string>();
+    cosmetic = new List<string>();
+
+    ResolveCategoryNames();
+
+    var allowed = AllAllowed();
+    for (int i = 0; i < allowed.Length; i++)
+    {
+        var opts = OfficialIdsForCategory(allowed[i]);
+        if (opts == null || opts.Length == 0)
+            functional.Add("许可类别 " + allowed[i] + " 无官方档位 → 开窗会空。");
+    }
+
+    // ★ 显示层降级：只影响 UI 上显示的是中文还是英文，不影响功能
+    if (_catRealNames.Count == 0)
+        cosmetic.Add("类别中文名表为空（16 张表全读不到）→ 界面显示 CATEGORY_ 英文（功能不受影响）。");
+    else if (_catRealNames.Count < _catListAccessors.Count)
+        cosmetic.Add("类别中文名只解析出 " + _catRealNames.Count + "/"
+                   + _catListAccessors.Count + " 条 → 未命中的那些显示英文原名。");
+}
+调用点（RealPrinterMod.cs）：
+
+csharp
+try
+{
+    License.SelfCheckLicense(out var funcBad, out var cosBad);
+    if (funcBad.Count > 0)
+        RLog.Error("★★ 许可功能自检发现 " + funcBad.Count + " 处问题：\n"
+                 + string.Join("\n", funcBad.ConvertAll(x => "    · " + x)));
+    if (cosBad.Count > 0)
+        RLog.Warning("⚠ 许可显示降级（不影响功能）：\n"
+                   + string.Join("\n", cosBad.ConvertAll(x => "    · " + x)));
+    if (funcBad.Count == 0 && cosBad.Count == 0)
+        RLog.Detail("许可自检通过（" + License.AllAllowed().Length + " 类均有官方档位）。");
+}
+catch (Exception e) { RLog.Error("★★ 许可自检异常: " + e.Message); }
+验证
+正常启动：无 Error / Warning
+
+若某版本游戏分类表为空：只看到 Warning，不是 Error
+
+修复 5 ⚠️ OnUpdate 上方重复的 <summary> 块
+问题定位
+文件：RealPrinterMod.cs · OnUpdate() 上方
+
+现象：两个连续的 <summary> XML 注释块（V1.4.15 修注释时没删干净）。
+
+修复方案
+删掉第一个（较短的）块。保留第二个（含"历史"说明的）。
+
+csharp
+// ❌ 删除这段
+/// <summary>
+/// ★ V1.4.12：恢复 F6 直领热键轮询。
+///   关着 cfg 时——**首行 return，零开销**（只读一次静态 bool）。
+///   关闭时按 F6 无反应且不弹提示（核桃 2026-10-05 拍板）。
+/// </summary>
+
+// ✅ 保留这段
+/// <summary>
+/// ★★ V1.4.12：恢复 F6 直领热键轮询。
+///   关着 cfg 时 —— **首行 return，零开销**（只读一次静态 bool）。
+///   ...
+/// </summary>
+public override void OnUpdate()
+验证
+编译通过，IDE 不再显示"两个 XML 注释文档"警告。
+
+修复 6 ⚠️ IsDraggingNow 三处隐性耦合的可见化
+问题定位
+文件：RealPrinterMod.MachineBuilder.cs
+
+根因：
+
+IsDraggingNow() 依赖 _dragging 缓存
+
+_dragging 由 SampleDragState() 填
+
+SampleDragState() 由 OnUpdate() 调
+
+任一环出问题（OnUpdate 没挂、SampleDragState 抛异常、ItemMouseDragHandler.current 永远为 null），拖动让路机制静默失效，没有任何日志。
+
+修复方案
+在 SampleDragState 里首次成功读到非 null 的 handler 时打一行 Detail，或首次异常时打一次 Warning。用一个 static bool 保证只打一次：
+
+csharp
+private static bool _dragProbeReported;
+
+private static void SampleDragState()
+{
+    try
+    {
+        var h = ItemMouseDragHandler.current;
+        _dragging = h != null && h.IsDraggingItem;
+
+        // ★ 首次成功读到 handler → 报一次"机制正常"
+        if (!_dragProbeReported && h != null)
+        {
+            _dragProbeReported = true;
+            RLog.Detail("拖动采样机制正常：ItemMouseDragHandler.current 可读。");
+        }
+    }
+    catch (Exception ex)
+    {
+        RLog.Swallowed("SampleDragState", ex);
+        _dragging = false;
+
+        // ★ 首次异常 → 报一次，之后由 Swallowed 限流处理
+        if (!_dragProbeReported)
+        {
+            _dragProbeReported = true;
+            RLog.Warning("⚠ 拖动采样异常 —— 拖动让路机制可能失效。"
+                       + "原因：" + ex.GetType().Name + ": " + ex.Message);
+        }
+    }
+}
+验证
+首次进店 / 首次拖动：日志出现一次 拖动采样机制正常
+
+若 ItemMouseDragHandler.current 一直为 null：无日志（说明机制没跑），这时需要排查游戏版本
+
+修复优先级与执行建议
+#	修复	类型	风险	建议时机
+1	拖动起始帧兜底	逻辑	低（增量修复）	立即
+5	重复 <summary>	清理	零	立即
+4	SelfCheckLicense 分级	日志	低（拆分返回值）	立即
+2	IsContainerLike 缓存	性能	低（单槽缓存）	立即
+6	拖动采样可见化	排障	零	立即
+3	主仓库 tag 验证	功能	需要先实机验证	实机验证后再决定
+建议分两个 PR：
+
+PR-A（低风险）：1、2、4、5、6 —— 都是增量修复 + 清理，编译通过即可提交
+
+PR-B（需验证）：3 —— 先加临时日志实机跑一次，拿到主仓库物品的 tag 情况再决定改动

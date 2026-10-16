@@ -701,6 +701,12 @@ public sealed partial class RealPrinterMod
         private static bool _catResolved;
         private static int _catRetry;      // 已重试次数（用尽 3 次后不再试，退回手写兜底）
 
+        /// ★★ V2：哪些语义标签的值是**手写兜底**（不是从游戏表读回来的）。
+        ///   【为什么要有这张表】自检要报"哪些中文名是猜的"就得能**列名字** ——
+        ///   光报"x/16"下次还是同样的盲区（不知道缺的是哪几类、为什么缺）。
+        private static readonly HashSet<string> _catGuessed
+            = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         /// <summary>
         /// ★ 从游戏自己的分类档位表解析出每个语义标签的真实 category 名。
         ///   必须在**官方档位目录建好之后**调（那些静态列表由 .cctor 填充）。
@@ -718,6 +724,7 @@ public sealed partial class RealPrinterMod
 
             // ★ 每次都先清空重扫 —— 避免上次失败残留污染本次结果
             _catRealNames.Clear();
+            _catGuessed.Clear();
             foreach (var kv in _catListAccessors)
             {
                 try
@@ -732,7 +739,13 @@ public sealed partial class RealPrinterMod
                 catch (Exception ex) { RLog.Swallowed("ResolveCategoryNames", ex); }
             }
 
-            if (_catRealNames.Count > 0)
+            // ★★ V2：判据从"读到 ≥1 条"改成"**16 张表全部**读回真名"。
+            //   【为什么必须改】旧判据只要读到 1 条就 `_catResolved = true`（**永久锁定**），
+            //     而 `_catRetry` 只在"一条都没读到"时才递增 —— 于是"部分解析"
+            //     既不会重试、也不会自我修正，被固化成 x/16，且每次启动都在自检里
+            //     报一条降级。部分解析和零条**本质是同一件事**（游戏 .cctor 还没跑完），
+            //     必须走同一条重试路径。
+            if (_catRealNames.Count == _catListAccessors.Count)
             {
                 _catResolved = true;
                 foreach (var kv in _catRealNames)
@@ -740,19 +753,37 @@ public sealed partial class RealPrinterMod
                 return true;
             }
 
-            // ★ 一个字都没读到 —— 允许有限次重试
+            // ★ 未读全（含一个字都没读到）—— 允许有限次重试
             if (_catRetry < 3)
             {
                 _catRetry++;
-                RLog.Detail("许可类别名读取失败（第 " + _catRetry + " 次尝试），稍后重试。");
+                RLog.Detail("许可类别名未读全（" + _catRealNames.Count + "/"
+                            + _catListAccessors.Count + "，第 " + _catRetry + " 次尝试），稍后重试。");
                 return false;
             }
 
-            // 用尽重试 → 退回手写兜底 + 明摆着报警（否则就是"默默开不了窗"）
+            // 用尽重试 → 缺的那些用手写兜底补齐。
+            // ★ 已读到的**保留**（真名比手写准），只补缺口 —— 旧版是整表覆盖，
+            //   等于把已经读回来的真名又换成手写猜测，纯亏。
+            var guessedNames = new List<string>();
+            foreach (var kv in _catFallback)
+            {
+                if (_catRealNames.ContainsKey(kv.Key)) continue;
+                _catRealNames[kv.Key] = kv.Value;
+                _catGuessed.Add(kv.Key);
+                guessedNames.Add(kv.Key);
+            }
             _catResolved = true;
-            foreach (var kv in _catFallback) _catRealNames[kv.Key] = kv.Value;
-            RLog.Warning("⚠ 许可类别名读取失败（已重试 " + _catRetry
-                         + " 次）→ 回退到**手写字符串**（若机器开不了窗，多半是这个原因）。");
+
+            if (guessedNames.Count == _catListAccessors.Count)
+                RLog.Warning("⚠ 许可类别名读取失败（已重试 " + _catRetry
+                             + " 次）→ 全部回退到**手写字符串**（若机器开不了窗，多半是这个原因）。");
+            else
+                RLog.Warning("⚠ 许可类别名只读回 "
+                             + (_catListAccessors.Count - guessedNames.Count) + "/"
+                             + _catListAccessors.Count + " 条；以下 " + guessedNames.Count
+                             + " 条由**手写字符串**兜底（界面可能显示英文原名，功能不受影响）："
+                             + string.Join(" / ", guessedNames.ToArray()));
             return true;
         }
 
@@ -788,20 +819,30 @@ public sealed partial class RealPrinterMod
         }
 
         /// <summary>
-        /// ★ 许可自检（启动时跑一次）。
+        /// ★ 许可自检（启动时跑一次）。★★ V2：返回值**分两级**。
         ///
         /// 【查两件事】
-        ///   ① 每个许可 category 在官方档位目录里**必须真的有档位**。
+        ///   ① 每个许可 category 在官方档位目录里**必须真的有档位** → **功能故障**。
         ///      V1.5.0 起许可集合就是目录的键，这条按构造必然成立 ——
         ///      留着是防将来有人又把许可换成手写名单（那正是 V0.5.18 的事故形态）。
-        ///   ② ★ V1.5.0 新增：16 张分类静态表**读回来几个真名**。
-        ///      它决定玩家看到的类别名是中文还是一串 CATEGORY_ 英文。
-        ///      以前这条藏在"许可解析"里，V1.5.0 把许可拆走后就没人查了 ——
-        ///      必须补上，否则中文名全丢也一行日志都没有。
+        ///   ② 16 张分类静态表**读回来几个真名** → **显示降级**（只影响 UI 上
+        ///      显示中文还是 CATEGORY_ 英文，功能一点不受影响）。
+        ///
+        /// 【★★ V2 为什么必须拆】
+        ///   旧版把 ② 也塞进 `bad`，调用点统一打成 `RLog.Error`（启动一条红字）→
+        ///   玩家看到"每次启动都报错"，以为 mod 坏了。**误报比不报更坏**：
+        ///   它让人去查一个不存在的故障（这与 MEMORY 铁律同源）。
+        /// 【★★ V2 为什么还要"列名字"】
+        ///   旧文案只有"只解析出 x/16 条"—— 无从下手。列出**缺的是哪几类**，
+        ///   下次进游戏可直接核对（多半是那个游戏版本本来就没有这类内容）。
+        /// 【★★ V2 为什么只在"已定案"后才报】
+        ///   重试还开着（`_catResolved == false`）就不该报 —— 那不是降级，
+        ///   只是"还没读完"，此刻报出去就是纯噪音，而且每次启动都会报一条。
         /// </summary>
-        internal static List<string> SelfCheckLicense()
+        internal static void SelfCheckLicense(out List<string> functional, out List<string> cosmetic)
         {
-            var bad = new List<string>();
+            functional = new List<string>();
+            cosmetic = new List<string>();
 
             // ★ 启动时就把类别真名表定下来（中文名要用），别等到第一次开窗
             ResolveCategoryNames();
@@ -812,18 +853,26 @@ public sealed partial class RealPrinterMod
                 string cat = allowed[i];
                 var opts = OfficialIdsForCategory(cat);
                 if (opts == null || opts.Length == 0)
-                    bad.Add("许可类别 " + cat
+                    functional.Add("许可类别 " + cat
                             + " 在游戏官方档位目录里没有对应档位 → 这类商品开窗会是空的。");
             }
 
-            if (_catRealNames.Count == 0)
-                bad.Add("类别中文名表为空 —— 16 张 ItemConditionList 分类表全读不到，"
-                        + "界面上会显示 CATEGORY_ 英文原名（功能不受影响）。");
-            else if (_catRealNames.Count < _catListAccessors.Count)
-                bad.Add("类别中文名只解析出 " + _catRealNames.Count + "/"
-                        + _catListAccessors.Count + " 条 —— 未命中的那些会显示 CATEGORY_ 英文原名。");
-
-            return bad;
+            // ② 显示降级：只影响"中文名从哪来"，不影响能不能改
+            if (_catResolved && _catGuessed.Count > 0)
+            {
+                if (_catGuessed.Count == _catListAccessors.Count)
+                    cosmetic.Add("类别中文名**全部**来自手写兜底（" + _catListAccessors.Count
+                                 + " 张游戏分类表一张都没读回）"
+                                 + "—— 界面可能显示 CATEGORY_ 英文原名（功能不受影响）。");
+                else
+                {
+                    var names = new List<string>(_catGuessed);
+                    cosmetic.Add("类别中文名有 " + names.Count + "/" + _catListAccessors.Count
+                                 + " 条来自手写兜底（游戏分类表没读到）："
+                                 + string.Join(" / ", names.ToArray())
+                                 + " —— 这几类会显示英文原名（功能不受影响）。");
+                }
+            }
         }
 
         // ── 类别中文名兜底表（代码评审 P1-5：switch → Dictionary）──

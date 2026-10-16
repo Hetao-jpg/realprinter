@@ -1,0 +1,438 @@
+RealPrinter V1.5.0 修复方案汇总 · V2（按实际代码校正）
+
+═══════════════════════════════════════════════════════════════════
+【V2 说明 —— 与 V1 的关系】
+═══════════════════════════════════════════════════════════════════
+· 基线不是"假设的 V1.5.0"，而是**工作区当前代码**（HEAD = f3de42d，
+  v1.5.0，未提交改动只有本文件与 V1 文档）。V1 里每一条我都回到源码核过。
+  ★ 基线已实跑：`dotnet build` → **0 警告 0 错误**（所以本方案里没有"顺手修编译错"
+    这类内容，全是行为/可读性层面的改动）。
+· 每条标了【依据】= 代码行号 / 课题文档 / 实机日志。**我没验证的，明写"未验证"**，
+  不拿推测当结论。
+· V1 的 6 条，处置结论：
+    1（拖动起始帧兜底）  → 修正：前提未取证，降级；真正的缺口在别处（见 V2-1）
+    2（容器判据缓存）    → 修正：**单槽缓存等于没缓存**，改成拖动期多槽缓存
+    3（主仓库 tag）      → 拆开：第一步取证保留，**第二步兜底代码否决**（会废掉柜台主用法）
+    4（自检分级）        → 采纳，但只分级不够，得同时治"为什么会降级"
+    5（重复 summary）    → 采纳，范围从 1 处扩到 **4 处重复 + 1 处错位**
+    6（拖动采样可见化）  → 采纳，两处小修正
+· 新增 1 条，且是唯一"会被玩家看到"的硬缺陷：
+    V2-1 🔴 拖动延迟保护被 DragToUse 绑死 —— 按 README 关掉拖动，反而回到崩溃窗口
+
+───────────────────────────────────────────────────────────────
+【V1 → V2 处置表】
+───────────────────────────────────────────────────────────────
+  V1#  V2#  结论        一句话
+   1    2   修正·降级   前提（同帧调 Target）没证据；但"实时复核"本身值得加，改成加固项
+   2    3   修正        单槽缓存对"每帧问 N 个目标"的热路径无效，必须按指针多槽
+   3    4   部分否决    取证保留；ContainsPtr 兜底会把"柜台上的商品"判成容器 → 开不了窗
+   4    5   采纳+补根因 单项拆分返回值治不了"部分解析被永久锁定"→ Warning 仍会天天刷
+   5    6   采纳+扩范围 全量扫描后是 4 处重复 + 1 处错位注释
+   6    7   采纳        两个标志要分开；另补启动一行"采样已启用"
+  —     1   新增 🔴     OnTargetItemFunc 的安全延迟被 cfg 绑死
+
+
+═══════════════════════════════════════════════════════════════════
+V2-1 🔴【新增·最高优先】拖动延迟保护被 cfg 绑死，关掉 DragToUse 反而回到崩溃窗口
+═══════════════════════════════════════════════════════════════════
+【问题定位】RealPrinterMod.MachineBuilder.cs · OnTargetItemFunc() L457~487
+现码：
+    if (Config.DragToUse && IsDraggingNow())
+    {
+        QueueDrop(target);
+        return;
+    }
+    RunTargetItemFunc(target);
+
+【依据（全部可确证，不需实机）】
+① 这段"压后一帧"**不是功能，是安全机制**。文件自己的注释 L459~477 写得很清楚：
+   游戏在 `ItemMouseDragHandler.EndDrag` 内部**自己**调 `GameItem.Target`
+   （崩栈：`Patch_Target.Prefix ← managed_EndDrag → OnTargetItemFunc`），
+   此刻 target 可能正在被销毁；此时进 IL2CPP（OpenEditor → DetectFeatures）
+   = 野指针喂原生函数，**AccessViolationException 抓不住**（MEMORY 铁律）。
+   延迟到"EndDrag 已跑完、状态已稳定"的下一帧，才把窗口从最危险的时刻挪走。
+② 但这段保护的**前置条件写成了 `Config.DragToUse`**：面板一关，保护整条消失，
+   拖动落点的 Target 调用直接落到 `RunTargetItemFunc(target)` → OpenEditor
+   → `DetectFeatures(target)`（编辑窗准入里只有 IsSafeTarget 一道活体闸，
+   而注释 L388~399 自己承认 WasCollected 未必及时置位 → 拦不住半死对象）。
+③ 而 README「常见问题」恰好教玩家：**"拖动机器会闪退 → 先把 DragToUse 关掉"**。
+   → 在 V1.5.0 里，这个自救动作把玩家直接推回 V1.5.0 想修掉的那个崩溃窗口。
+   （V1.4.x 时代没有这个问题：那时首行是**无条件**的 `if (IsDraggingNow()) return;`，
+     cfg 关不关都短路。是 V1.5.0 把短路挪进 cfg 条件后才出现的。）
+④ 同一处的注释 L479 写「cfg 关掉就退回 V1.4.x 行为：拖动不触发」——**与代码不符**。
+   代码的实际行为是"既触发、又不延迟"，三者（注释/README/代码）互相矛盾。
+
+【修复】把"延迟"与"触发开关"拆开：延迟永远生效，cfg 只决定落点要不要开窗。
+方案 A（推荐，改结构，不依赖任何状态判得准不准）：
+    // ★ 拖动状态在代码里从来没有"判得准"的时候（采样一帧一次、EndDrag 时序不定），
+    //   所以安全做法是**结构性的**：一律压后一帧再决定。
+    internal static void OnTargetItemFunc(GameItem target)
+    {
+        // 无条件入队。点击路径同样只晚一帧（≈16ms，玩家无感），
+        // 但换来的好处是：**开窗这件事永远不会发生在 EndDrag 内部** ——
+        // 不依赖缓存准不准、不依赖实时读得到什么、不依赖游戏哪个版本先置 false。
+        QueueDrop(target);
+    }
+
+    private sealed class PendingDrop
+    {
+        public GameItem Target;
+        public IntPtr Ptr;
+        public float QueuedAt;
+        public bool FromDrag;      // ★ 新增：本次落点是不是拖动来的
+    }
+
+    private static void QueueDrop(GameItem target)
+    {
+        if (target == null) return;
+        IntPtr p;
+        try { p = ((Il2CppObjectBase)target).Pointer; } catch { return; }
+        if (p == IntPtr.Zero) return;
+        _pendingDrop = new PendingDrop
+        {
+            Target = target,
+            Ptr = p,
+            QueuedAt = Time.unscaledTime,
+            // 尽力而为的归类（判错的最坏后果只是"关着拖动时多开一次窗"，不是崩溃）
+            FromDrag = IsDraggingNow() || IsReallyDraggingNow(),
+        };
+    }
+
+    private static void TickPendingDrop()
+    {
+        var pd = _pendingDrop;
+        if (pd == null) return;
+
+        // ① 拖动触发关着 → 拖动落点直接丢弃（回到 V1.4.x「拖动不触发」）
+        if (pd.FromDrag && !Config.DragToUse)
+        {
+            _pendingDrop = null;
+            return;
+        }
+
+        // ② 拖动还没结束 → 继续等（含 2 秒超时保护，原逻辑不动）
+        if (IsDraggingNow())
+        {
+            if (Time.unscaledTime - pd.QueuedAt < 2f) return;
+            _pendingDrop = null;
+            RLog.Detail("拖动落点等待超时（isDragging 未复位），已丢弃本次落点。");
+            return;
+        }
+
+        // ③ 真正开窗（指针漂移闸 / 活体闸保留原样）
+        _pendingDrop = null;
+        ...（其后代码不变）
+
+【为什么不选方案 B（V1 那条"cache || 实时读"）】
+  实时读只能证明"此刻 isDragging 是 false"，**证明不了"EndDrag 已经跑完"** ——
+  危险窗口恰恰就是"isDragging 已 false、EndDrag 还没跑完"那一小段。
+  也就是说 B 在最需要它的时候恰好给不出保护，而 A 从结构上让这段窗口不可能被踩到。
+  （`IsReallyDraggingNow()` 仍然保留，只用于 QueueDrop 的 FromDrag 归类。）
+
+【验证】
+· 面板**关掉** DragToUse：反复拖打印机 10 次 → 一次不开窗、一次不闪退
+· 打开 DragToUse：拖到商品上 → 松手后开窗（不早不晚）
+· 装备后左键点商品 → 开窗（晚一帧，玩家无感）
+· 拖动穿过工具箱/档案箱 → 仍然进得去（让路机制不受影响）
+· README 那句"关掉 DragToUse 自救"在新版下必须仍然成立，且要补一句说明
+
+
+═══════════════════════════════════════════════════════════════════
+V2-2 ⚠️【V1-修复1 修正】拖动起始帧的实时兜底 —— 前提未取证，降级为加固项
+═══════════════════════════════════════════════════════════════════
+【V1 的说法】"按下鼠标、移动超过拖动阈值、游戏同一帧内调 GameItem.Target 时，
+  缓存里 _dragging 还是 false → 立刻开窗"。
+
+【核对结论】现象方向成立，但**前提没有证据**：
+· `GameItem.Target` 的调用点只有两处（依据：课题文档《共享机制与 mod 实战》§6 +
+  实机崩栈 `<EndDrag>d__12.MoveNext()`）：① 装备后点击；② `EndDrag` 异步状态机。
+· 拖动过程中游戏问的是 `MayTarget`/`CanTarget`（高亮），**不是 Target**。
+  MachineBuilder.cs L511 那句"悬停高亮也会问 Target"是推断，未取证。
+· 所以"同一帧内调 Target"这个前提，我找不到支撑。**未验证**。
+【但它值得加】缓存滞后一帧是真的，代价也确实低：
+  `IsDraggingNow() || IsReallyDraggingNow()` 的 `||` 会短路 —— 缓存为 true 时
+  不多读；只有"缓存说没在拖"（点击路径 + 起步帧）才多两次 IL2CPP 属性读。
+【V2 定级】从 V1 的"立即"降为 P2 加固项。**理由**：V2-1 的方案 A 已经从结构上
+  让"起步帧误开窗"失效（起步帧的落点同样进队列、同样等拖动结束才处理），
+  这条只剩"多一道判据"的意义。
+【代码】`IsReallyDraggingNow()` 保留 V1 写法（finally 兜底 + RLog.Swallowed），
+  调用点改到 QueueDrop（见 V2-1），不再放在 OnTargetItemFunc 第一行。
+【验证】连拖 10 次 0 次误开窗；点 10 次每次开窗。
+
+
+═══════════════════════════════════════════════════════════════════
+V2-3 ⚠️【V1-修复2 修正】容器判据缓存 —— 单槽缓存等于没缓存
+═══════════════════════════════════════════════════════════════════
+【V1 的判断】"拖动期间落点是唯一的（_pendingDrop 只有一个），所以单槽足够"。
+【核对结论】这个论证**用错了量**：
+· 单槽缓存的服务对象不是 `QueueDrop`（落点确实唯一），而是 `IsTargetEditable`；
+· `IsTargetEditable` 挂在 `MayTarget`/`CanTarget` 上，游戏**每帧对可见的每个物品
+  都问一遍**（依据：Interact.cs L113~117 / L190~196 记录的实机日志"每秒被调 900+ 次，
+  单次尝试刷出 900+ 行"）；
+· 拖动中每帧被问的目标是**一整排不同物品**（N 个），指针键每帧都被下一个物品顶掉：
+  N 个物品 × 每帧重算 → **一次都没省**。V1 的缓存收益 ≈ 0。
+
+【修复】拖动期按指针**多槽缓存**（容器 tag 在一次拖动里不会变），拖动结束清空：
+    private static readonly Dictionary<long, bool> _containerCache = new Dictionary<long, bool>();
+    private static bool _draggingPrev;
+
+    private static void SampleDragState()
+    {
+        try
+        {
+            var h = ItemMouseDragHandler.current;
+            _dragging = h != null && h.IsDraggingItem;
+
+            // ★ 拖动结束的下降沿 → 清缓存（见下"清缓存位置"）
+            if (_draggingPrev && !_dragging) _containerCache.Clear();
+            _draggingPrev = _dragging;
+        }
+        catch (Exception ex) { RLog.Swallowed("SampleDragState", ex); _dragging = false; }
+    }
+
+    private static bool IsContainerLikeCached(GameItem target)
+    {
+        long p;
+        try { p = ((Il2CppObjectBase)target).Pointer.ToInt64(); } catch { return false; }
+        if (p == 0) return false;
+
+        bool v;
+        if (_containerCache.TryGetValue(p, out v)) return v;
+
+        if (_containerCache.Count >= 512) _containerCache.Clear();   // 上限保护
+        try { v = target.IsTag(ContainerTag); }
+        catch (Exception ex) { RLog.Swallowed("IsContainerLike", ex); v = false; }
+        _containerCache[p] = v;
+        return v;
+    }
+
+★ 清缓存的**位置**是 V1 写错的地方：V1 说"在 TickPendingDrop 处理完后清"，
+  但 TickPendingDrop 在 `_pendingDrop == null` 时**首行就 return** ——
+  而"拖动中让路给箱子"这条路恰恰不会产生落点 → 缓存永远不清：
+  两次拖动之间指针被复用就会留下错误结论，而且会无界增长。
+  必须放在**每帧都会跑的 SampleDragState 的下降沿**。
+
+【收益量级】拖动中每物品每帧：1 次 IL2CPP 调用 → 1 次字典命中
+  （与同一路径上 HotLog 的开销同量级，可接受）。
+【验证】柜台塞满 20+ 件时拖动穿过，帧率与 V1.5.0 无差别；
+  拖进工具箱/档案箱仍然进得去；拖到商品上仍然开窗。
+【残留风险（如实记）】让路判据本身仍用的是**采样缓存**（IsTargetEditable 热路径，
+  不能实时读）。理论上"松手那一帧采样还没跟上"会让让路失败 → 表现为"箱子放不进"。
+  实测（README：拖进箱子可用）说明概率极低；若实机复现，再考虑把它换成
+  "拖动闩锁"（本帧或上帧拖过就算在拖）。**不作为本轮改动**。
+
+
+═══════════════════════════════════════════════════════════════════
+V2-4 ⚠️【V1-修复3 部分否决】主仓库 tag —— 取证保留，兜底代码不能上
+═══════════════════════════════════════════════════════════════════
+【V1 要验证的问题本身是对的】IsContainerLike 只查 ContainerTag；
+  若"主仓库里的物品"不带这个 tag，拖到它身上会被我们接管 → 开窗，而不是被收纳。
+【但 V1 给的第二步（ContainsPtr 兜底）有两个硬伤，**否决**】
+① **会误伤前柜台 —— 直接废掉本机主用法**。兜底把"目标在 emp.frontInvinvElement 里"
+   也算容器 → 玩家把打印机拖到**柜台上的香烟**（README 头条用法）会被判成"容器"
+   → 让路 → 开不了窗。
+   依据：RealPrinterMod.DealerSupply.cs L27~35，`TryGetInventory(true)` 返回的就是
+   前柜台 `frontInvinvElement`。V1 的兜底里那句"前柜台"是照抄了工具函数，
+   没意识到柜台正是主战场。
+② **复杂度放错地方**。`IsTargetEditable` 在 900+/s 的热路径上，
+   ContainsPtr 是 O(N) 的 IL2CPP 列表读 → 比一次 IsTag 贵 N 倍，还得再配一套缓存。
+③ 而且它**没有回答真正的问题**：判据仍然是"目标物品是不是容器"，
+   而不是"**落点所在的库存是不是储物类**"。两者只在"目标恰好是个箱子"时才等价。
+
+【V2 做法】只做第一步取证，且把日志放在**冷路径**（每次拖动 1~几次，不进热路径）：
+    // QueueDrop 里追加（VerboseLog 控制）
+    if (Config.VerboseLog)
+        RLog.Detail("拖动落点: id=" + SafeId(target)
+                    + " 目标带ContainerTag=" + IsContainerLike(target)     // 目标自己是不是容器
+                    + " 在柜台=" + IsOnFrontCounter(target)                 // 已有函数 DealerSupply.cs
+                    + " 在主仓库=" + IsInWarehouse(target));                // 新写一个同构的（照抄 IsOnFrontCounter）
+    实机跑三种落点，连"游戏实际做了什么"一起记：
+      a. 拖到主仓库的**空格子**  → 预期：放进去（走放置逻辑）
+      b. 拖到主仓库里**已有的商品**（香烟等）→ 看：开窗？还是被收纳？← **这一条决定要不要改**
+      c. 拖到**柜台上的商品**    → 必须：开窗 ← **红线，任何方案都不能破坏**
+   判定：只有 b 出现"本想收纳却被开窗"才算缺陷。
+   若确认是缺陷，优先考虑"按落点所在库存判让路"（即上面 ③ 的那套判据），
+   而不是按目标物品的 tag —— 后者必然要在"柜台里的商品"和"仓库里的商品"之间二选一。
+【未验证清单】
+  · 主仓库 / 柜台物品是否带 CONTAINER_TAG（本条的未知量）
+  · 玩家拖到"库存里的商品"上时，游戏的落点优先级（放置 vs 使用）
+
+
+═══════════════════════════════════════════════════════════════════
+V2-5 ⚠️【V1-修复4 采纳 + 补根因】许可自检分级 —— 分级治不了"为什么会降级"
+═══════════════════════════════════════════════════════════════════
+【V1 诊断成立】Core.cs L819~824 把"类别中文名没解析全"塞进 `bad` →
+  RealPrinterMod.cs L69~77 打成 `RLog.Error`（MelonLoader 红字，每次启动一条）
+  → 玩家以为 mod 坏了。拆 `(functional, cosmetic)` 两级、cosmetic 走 Warning：
+  **采纳，照 V1 代码改**。
+
+【只改这里不够 —— 根因在 ResolveCategoryNames（Core.cs L715~757）】
+    if (_catRealNames.Count > 0)
+    {
+        _catResolved = true;      // ← 只要读到 ≥1 条就**永久锁定**
+        ...
+        return true;
+    }
+    ...
+    if (_catRetry < 3) { _catRetry++; ... return false; }   // ← 只有"一条都没读到"才计数
+· 16 张表只要在那个时刻有 1 张已 .cctor 完、其余还没 → 表被固化成"1/16"；
+· 而 `_catRetry` 只在**零条**时才递增 → **部分解析永远不会重试**；
+· 于是 cosmetic 那条"只解析出 x/16"会**每次启动都刷**。
+  分级只把它从红字变成黄字，噪音没消失。
+
+【V2 一起做（四处）】
+① 返回值分级：`SelfCheckLicense(out List<string> functional, out List<string> cosmetic)`，
+   调用点 functional → RLog.Error，cosmetic → RLog.Warning。
+② 判定"完整解析"= `_catRealNames.Count == _catListAccessors.Count`；
+   只有完整解析才 `_catResolved = true`；部分解析与零条**走同一条重试路径**
+   （仍受 `_catRetry < 3` 约束，不会无限重试，也不会每次开窗刷异常）。
+③ cosmetic 里**列名字**，不只报数量：
+   "类别中文名未解析：模块卡死 / 赠品（界面会显示 CATEGORY_ 英文原名，功能不受影响）"
+   —— 比"3/16"可定位得多（这正是"静默失效要留证据"的同一条纪律）。
+④ `_catRetry` 语义写清：从"零条才计数"改成"未完整解析就计数"，并把注释里的
+   "读不到"改成"未读全"，否则下一个人又会按旧语义改回去。
+【验证】正常启动只有一行 Detail；人为把某张静态表读成空 → 启动出现
+  **一行** Warning 且带缺失类别名，不是 Error、不重复刷。
+
+
+═══════════════════════════════════════════════════════════════════
+V2-6 ⚠️【V1-修复5 采纳 + 扩范围】重复/错位 XML 注释 —— 4 处重复 + 1 处错位
+═══════════════════════════════════════════════════════════════════
+V1 只报了 RealPrinterMod.cs 的 OnUpdate 上方一处。全量扫描（连续 `///` 块内出现
+≥2 个 `<summary>`）结果如下：
+  #  文件                                    行         处理
+  1  RealPrinterMod.cs                        L252~266   保留第二块（含【历史】）
+  2  RealPrinterMod.MachineBuilder.cs         L95~112    保留第二块（V1.4.12 valueOverride 语义）
+  3  RealPrinterMod.FeatureWriter.cs          L38~54     保留第二块（realCondition 正文）
+  4  RealPrinterMod.Runtime.cs                L70~81     保留**第一块**（含"默认关 → 必须
+                                                        明确告诉玩家为什么没反应"），
+                                                        把第二块的 V1.4.12"价值固定 0"一行并进去
+  +1 错位：RealPrinterMod.MachineBuilder.cs L401~403 是一段
+     "★ 官方交互入口的落地实现（对应 LabelerHelper.OnTargetItem → LabelerUIManager.OpenUI）"
+     —— 描述的是 `OnTargetItemFunc`，却紧贴在 `IsDraggingNow` 的 `<summary>` 前面
+     （挂错对象）。而 L451~456 已经有一份完整的同款说明 → **删除 L401~403**。
+
+【影响 —— 有一处要纠 V1】
+· V1 说"编译通过，IDE 不再显示'两个 XML 注释文档'警告"。**实测不成立**：
+  本工程没开 `<GenerateDocumentationFile>`（csproj 里没有，也没有 Directory.Build.props），
+  Roslyn 在这种配置下**不产生 CS1587**——我实跑基线编译是 **0 警告 0 错误**。
+  也就是说这 4 处重复注释**不报警**，代价是纯粹的可读性/误导（读者看到两份
+  互相矛盾或重复的说明，不知道哪份是现行语义），错位那条更是"注释挂错对象"。
+· 结论：这条的价值是**消歧**，不是消警告 —— 别指望"改完就没警告了"，
+  改完本来就 0 警告。
+【验证】编译 0 警告 0 错误（改前改后都一样）；人工复核：每个成员上方只剩一份说明，
+  且是现行语义那一份。
+
+
+═══════════════════════════════════════════════════════════════════
+V2-7 ⚠️【V1-修复6 采纳】拖动采样可见化 —— 两处修正
+═══════════════════════════════════════════════════════════════════
+【V1 方案照做，改两点】
+① V1 用**一个** `_dragProbeReported` 同时管"机制正常"和"首次异常"两条：
+   一旦首次采样抛异常，之后就算恢复正常也永远不会打"机制正常"。
+   → 拆成两个标志：`_dragProbeOkLogged` / `_dragProbeWarned`。
+② V1 承认"current 恒为 null 时不会打任何日志" —— 而那恰恰是最需要被看见的失效形态。
+   → 补一行启动期 Detail（VerboseLog 下）：
+     "拖动采样已启用（DragToUse=开/关）；ItemMouseDragHandler.current
+      将在首次拖动时被读取。" 这样"这套机制到底有没有跑"在日志里是可查的，
+      而不是只能靠"有没有出现机制正常那行"倒推。
+【代码】V1 原文 + 上述两点；`RLog.Swallowed` 保留（它自带首条 + 每 N 条的限流）。
+【与 V2-4 的合并】落点日志（V2-4 那行）只写一份，放在 QueueDrop ——
+  同一条日志同时服务"拖动路径可见化"与"主仓库落点取证"，不要再写第二份。
+【验证】首次读到 handler → 一行 Detail；人为让 SampleDragState 抛异常 →
+  一行 Warning（不是每帧刷屏）；current 恒 null → 有启动那行 Detail 可对照。
+
+
+═══════════════════════════════════════════════════════════════════
+优先级与执行建议（V2）
+═══════════════════════════════════════════════════════════════════
+  V2#  修复                          类型        风险              依据强度          时机
+   1   延迟保护与 DragToUse 解绑      安全/崩溃   低（只挪短路位置） 代码可确证      ★ 立即
+   6   注释清理（4 重复 + 1 错位）    清理        零                已扫描确认        立即
+   5   许可自检分级 + 统一重试路径    日志正确性  低                代码可确证        立即
+   3   容器判据改拖动期多槽缓存      性能        低                代码可确证        立即
+   7   拖动采样可见化                排障        零                —                 立即
+   2   起步帧实时复核（挪到 QueueDrop）逻辑加固   低                前提未取证（降级）随 A
+   4   主仓库落点取证（**不写兜底**）  功能        0（只加一行日志）  需实机            实机一轮后再定
+
+PR 划分：
+· PR-A（可立即提交，编译通过即可）：V2-1、2、3、5、6、7
+  —— 全是增量或清理；唯一的行为变化是 V2-1 把短路位置挪出 cfg 条件
+  （效果：关掉 DragToUse 时"拖动不触发"**终于名副其实**，且不再暴露崩溃窗口）。
+· PR-B（需要实机一轮）：V2-4 —— 只加一行 VerboseLog 落点日志，
+  跑完 a/b/c 三种落点再决定要不要动逻辑。
+· 已否决、不再实施：V1-修复3 的 `ContainsPtr` 兜底（理由见 V2-4）。
+
+【本轮未验证清单（如实列出，别当成已确认）】
+· `GameItem.Target` 是否会在拖动过程中被多次调用（影响 V2-2 的成本估计；
+  QueueDrop 的"后到覆盖先到"无论如何都是对的）
+· 主仓库 / 柜台物品是否带 CONTAINER_TAG（V2-4 的核心未知量）
+· 玩家把机器丢到"库存里的商品"上时，游戏的落点优先级（放置 vs 使用）
+· 拖动中每帧被问的可见物品数量（决定 V2-3 的收益量级）
+· V2-1 方案 A 会让**点击开窗晚一帧**：推断为玩家无感（≈16ms），实机需确认无异常
+
+
+═══════════════════════════════════════════════════════════════════
+【PR-A 执行状态 · 2026-10-16】
+═══════════════════════════════════════════════════════════════════
+已实施：V2-1、2、3、5、6、7（六个文件改动，`dotnet build` Debug/Release
+均 0 警告 0 错误；Release 构建已部署到
+`Probably Stolen Demo\Mods\RealPrinter.dll`，旧 DLL 备份为
+`RealPrinter.dll.bak-20261016-0857`）。
+
+实施过程中出现、需要记账的三点（与方案原文的差异）：
+  1. 【V2-5 的实际形态】SelfCheckLicense 的 cosmetic 那条**在正常启动时几乎不会触发**：
+     因为启动那一次 `ResolveCategoryNames()` 若未读全就返回 false（重试还开着），
+     按"只在已定案后才报"的规则被跳过 —— 显示降级的信息实际由
+     `ResolveCategoryNames` 自己那条**带类别名**的 Warning 承担（用尽重试时才打）。
+     即：最坏情况每次启动**一条** Warning，且能指明缺哪几类。
+  2. 【V2-4 的取证已提前就位】那行落点日志（id / 拖动来源 / ContainerTag /
+     在柜台 / 在主仓库）随 PR-A 一起进了 `QueueDrop`，所以 PR-B 现在只剩
+     "开 VerboseLog 实机跑一轮"这一步，无需再改代码。
+     `IsInWarehouse()` / `IsInside()` 已加到 DealerSupply.cs（与 IsOnFrontCounter 同构）。
+  3. 【新增的已知残留】`FromDrag` 是尽力而为的归类：拖动刚结束的那一两帧里
+     若立刻点一下，可能被判成"拖动落点" → DragToUse 关着时这一次点击无反应。
+     窗口极窄（毫秒级）、且默认配置（DragToUse=开）完全不受影响。
+     **未实机验证**，如实记账。
+
+
+═══════════════════════════════════════════════════════════════════
+【实机验证 · 2026-10-16 08:57~08:59（Latest.log）】
+═══════════════════════════════════════════════════════════════════
+结论：**PR-A 通过 —— 无崩溃、无红字，核桃确认"回归正常"。**
+· 启动：交互补丁 3/3 ✓ · 目录 56 档/15 类 · 许可自检**无 Error**（V2-5 达标）
+· 拖动落点日志跑通（V2-7）；一次事件产出一条（成对出现见下"重复补丁"）
+· 三种落点全跑过：地面 / 主仓库 / 柜台 → **都开窗**，无异常、无超时
+  （"拖动落点等待超时" 0 次 → 拖动状态采样与结束判定正常）
+· 编辑窗与许可明细正常：`CATEGORY_GENUINE_CIGARETTE` / REAL=FAKE=genuineCigarette
+· 既有现象（非本轮引入）：启动早期偏移探针取不到 save_bag → 一条 WARNING
+
+★ V2-4 的未知量有答案了（不用再单独跑 PR-B 的取证）：
+  **主仓库与柜台里的物品都不带 `CONTAINER_TAG`**（日志：目标带ContainerTag=False，
+  无论落点在主仓库还是柜台）；拖到它们身上都是"对目标使用"→ 开窗，不是"放进库存"。
+  → **结论：维持现状，不动逻辑**。这与"拖到柜台上的商品必须开窗"是**同一条路径**；
+    一旦改成"目标躺在库存里就让路"，柜台主用法会一起废掉（这正是否决 v1 兜底的理由）。
+    核桃实机确认行为正常，故 V2-4 的 PR-B **不再需要**。
+
+★ 实机发现（跨 mod、非本轮引入、与本 mod 代码无关）：
+  我们的 Prefix 每次交互被执行两遍 —— 日志成对出现（同一毫秒两条
+  "交互被触发"/"拖动落点"），而"编辑窗"只有一条（第二次 QueueDrop 覆盖第一次，无害）。
+  XIAOWO 报 `RealPrinter` 的 4 个补丁"共注册 2 次"，且同一份诊断里另有 22 处同类重复
+  （VisitorCalendar / PPerkPack / WaterTower / DebugConsole / custom_rat_printer）。
+  排查：MelonLoader 加载 44 个程序集无重复；全盘仅 `Mods\RealPrinter.dll` 一份含本 mod 代码。
+  追溯历史日志：**从 10-15 17:50（v1.4.14）起每一局都这样** → 环境级问题，
+  嫌疑最大的是 `ModManager-1.2.5.dll`（二进制里有 Unpatch / HarmonyMethod，像是"排序后重打补丁"）。
+  影响：日志翻倍；OnItemBought 处理两次（幂等，无实害）。**我方代码不改**。
+  验证方法（待核桃有空再做）：临时移出 ModManager 进一次游戏，看重复是否消失。
+
+★ V2-7 的一处事后修正（实机暴露）：
+  第一版把"机制正常"的标志**无条件置位**、只让 RLog.Detail 吞掉输出 ——
+  结果"第一次采样发生在 VerboseLog 还没打开时"就把机会用掉了，整局一次都没打出来。
+  已改成**只在真的打出去时才置位**（并把启动那行搬进 SampleDragState），
+  重新构建（Release 73216B）并已部署到 Mods。
+
+★ 收尾状态
+  · 6 个源文件改动已提交（见 git log）；Release DLL 已部署，旧版备份
+    `RealPrinter.dll.bak-20261016-0857` 留在 Mods 目录
+  · 待观察（不影响使用）：一次 F6 按下的日志里出现过 2 组"已创建" ——
+    与 PR-A 无关（PR-A 没碰 F6/建机路径），要做的话下次单独排

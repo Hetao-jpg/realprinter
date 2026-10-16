@@ -74,9 +74,6 @@ public sealed partial class RealPrinterMod
     /// ★★ V1.3.0：正式获取改成"从同行处购买"，所以这个入口**默认关**。
     ///   → 关的时候按键必须**明确告诉玩家为什么没反应**，绝不能静默无响应
     ///     （MEMORY 铁律：静默失效是最难排查的故障）。
-    /// </summary>
-    /// <summary>
-    /// F6：领一台真实打印机（直接进主仓库）。
     /// ★ V1.4.12：价值固定为 0（防刷钱），cfg 开关已在 OnUpdate 前置判过。
     /// </summary>
     private static void GiveOneManually()
